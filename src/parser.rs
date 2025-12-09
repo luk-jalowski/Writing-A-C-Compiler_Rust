@@ -19,6 +19,13 @@ pub enum Statement {
 #[derive(Debug)]
 pub enum Expression {
     Constant(i32),
+    UnaryExpr(UnaryOperator, Box<Expression>),
+}
+
+#[derive(Debug)]
+pub enum UnaryOperator {
+    Complement,
+    Negate,
 }
 
 pub struct Parser {
@@ -88,7 +95,20 @@ impl Parser {
         match self.consume_token() {
             Some(token) => match token.token_type {
                 TokenType::Integer(val) => Expression::Constant(val),
-                _ => panic!("Expected integer"),
+                TokenType::Hyphen => {
+                    Expression::UnaryExpr(UnaryOperator::Negate, Box::new(self.parse_expression()))
+                }
+                TokenType::Tilde => Expression::UnaryExpr(
+                    UnaryOperator::Complement,
+                    Box::new(self.parse_expression()),
+                ),
+                TokenType::OpenParen => {
+                    let expr = self.parse_expression();
+                    self.expect(TokenType::CloseParen);
+                    expr
+                }
+
+                _ => panic!("Expected expression got {:?}", token),
             },
             None => panic!("Unexpected EOF while parsing expression"),
         }

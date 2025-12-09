@@ -14,6 +14,8 @@ pub enum TokenType {
     OpenBrace,  // {
     CloseBrace, // }
     Semicolon,  // ;
+    Tilde,      // ~
+    Hyphen,     // -
 
     // Two char tokens
 
@@ -88,6 +90,18 @@ impl<'a> Lexer<'a> {
                 '/' => {
                     self.lex_forwardslash();
                 }
+                '-' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Hyphen,
+                    });
+                    self.chars.next();
+                }
+                '~' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Tilde,
+                    });
+                    self.chars.next();
+                }
                 '0'..='9' => {
                     let num = self.lex_integer();
                     tokens.push(Token {
@@ -128,6 +142,8 @@ impl<'a> Lexer<'a> {
             if c.is_digit(10) {
                 num_str.push(c);
                 self.chars.next();
+            } else if c.is_ascii_alphabetic() {
+                panic!("Alphabetic chars have no place next to digits!");
             } else {
                 break;
             }
@@ -163,6 +179,18 @@ impl<'a> Lexer<'a> {
                     break;
                 }
                 self.chars.next();
+            }
+        // Check if it is /* comment */
+        } else if let Some('*') = self.chars.peek().copied() {
+            // Consume *
+            self.chars.next();
+
+            // Consume characters until */
+            while let Some(c) = self.chars.next() {
+                if c == '*' && Some('/') == self.chars.peek().copied() {
+                    self.chars.next();
+                    break;
+                }
             }
         } else {
             // If it's not a comment, it's an unsupported single '/'
