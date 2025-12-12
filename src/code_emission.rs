@@ -1,4 +1,8 @@
-use crate::code_gen::{AsmAst, AsmFunction, AsmInstruction, AsmOperand, AsmRegister, AsmUnaryOp};
+use std::ops;
+
+use crate::code_gen::{
+    AsmAst, AsmBinaryOp, AsmFunction, AsmInstruction, AsmOperand, AsmRegister, AsmUnaryOp,
+};
 
 pub struct CodeEmission {}
 
@@ -53,12 +57,26 @@ impl CodeEmission {
                     asm_code.push(format!("\tpop rbp\n"));
                     asm_code.push(format!("\tret\n"));
                 }
-                AsmInstruction::Unary { unary_op, operand } => {
+                AsmInstruction::Unary { op: op, operand } => {
                     asm_code.push(format!(
                         "\t{} {}\n",
-                        self.asm_unary_operator_to_string(unary_op),
+                        self.asm_unary_operator_to_string(op),
                         self.asm_operand_to_string(operand)
                     ));
+                }
+                AsmInstruction::Binary { op, left, right } => {
+                    asm_code.push(format!(
+                        "\t{} {}, {}\n",
+                        self.asm_binary_operator_to_string(op),
+                        self.asm_operand_to_string(left),
+                        self.asm_operand_to_string(right)
+                    ));
+                }
+                AsmInstruction::Idiv(operand) => {
+                    asm_code.push(format!("\tidiv {}\n", self.asm_operand_to_string(operand)));
+                }
+                AsmInstruction::Cdq => {
+                    asm_code.push(format!("\tcdq\n"));
                 }
             }
         }
@@ -79,11 +97,20 @@ impl CodeEmission {
             AsmUnaryOp::Not => "not".to_string(),
         }
     }
+    pub fn asm_binary_operator_to_string(&mut self, asm_op: &AsmBinaryOp) -> String {
+        match asm_op {
+            AsmBinaryOp::Add => "add".to_string(),
+            AsmBinaryOp::Mult => "imul".to_string(),
+            AsmBinaryOp::Sub => "sub".to_string(),
+        }
+    }
 
     pub fn asm_reg_to_string(&mut self, asm_reg: &AsmRegister) -> String {
         match asm_reg {
             AsmRegister::EAX => "eax".to_string(),
+            AsmRegister::EDX => "edx".to_string(),
             AsmRegister::R10d => "r10d".to_string(),
+            AsmRegister::R11d => "r11d".to_string(),
         }
     }
 }

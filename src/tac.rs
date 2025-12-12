@@ -1,5 +1,6 @@
-use crate::parser::{AST, Expression, Function, Statement, UnaryOperator};
-use std::cell::Cell;
+use core::panic;
+
+use crate::parser::{AST, BinaryOperator, Expression, Function, Statement, UnaryOperator};
 
 #[derive(Debug)]
 pub enum TacAst {
@@ -19,6 +20,12 @@ pub enum TacInstruction {
         dst: TacOperand,
     },
     Ret(TacOperand),
+    Binary {
+        op: TacBinaryOp,
+        src1: TacOperand,
+        src2: TacOperand,
+        dst: TacOperand,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +38,15 @@ pub enum TacOperand {
 pub enum TacUnaryOp {
     Complement,
     Negate,
+}
+
+#[derive(Debug)]
+pub enum TacBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
 }
 
 #[derive(Debug)]
@@ -100,6 +116,27 @@ impl TacProgram {
                     src,
                     dst: dst.clone(),
                 });
+                dst
+            }
+            Expression::BinaryExp(left, op, right) => {
+                let src1 = self.parse_expression(*left, tac_instructions);
+                let src2 = self.parse_expression(*right, tac_instructions);
+                let dst = self.new_temp_var();
+
+                let tac_op = match op {
+                    BinaryOperator::Addition => TacBinaryOp::Add,
+                    BinaryOperator::Subtraction => TacBinaryOp::Subtract,
+                    BinaryOperator::Multiplication => TacBinaryOp::Multiply,
+                    BinaryOperator::Division => TacBinaryOp::Divide,
+                    BinaryOperator::Modulo => TacBinaryOp::Remainder,
+                };
+                tac_instructions.push(TacInstruction::Binary {
+                    op: tac_op,
+                    src1,
+                    src2,
+                    dst: dst.clone(),
+                });
+
                 dst
             }
         }

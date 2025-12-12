@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
-    tac::{TacAst, TacFunction, TacInstruction, TacOperand, TacUnaryOp},
-};
+use crate::tac::{TacAst, TacBinaryOp, TacFunction, TacInstruction, TacOperand, TacUnaryOp};
 
 #[derive(Debug)]
 pub enum AsmAst {
@@ -22,9 +20,16 @@ pub enum AsmInstruction {
         dst: AsmOperand,
     },
     Unary {
-        unary_op: AsmUnaryOp,
+        op: AsmUnaryOp,
         operand: AsmOperand,
     },
+    Binary {
+        op: AsmBinaryOp,
+        left: AsmOperand,
+        right: AsmOperand,
+    },
+    Idiv(AsmOperand),
+    Cdq,
     AllocateStack(i32),
     Ret,
 }
@@ -42,10 +47,19 @@ pub enum AsmUnaryOp {
     Not,
 }
 
+#[derive(Debug)]
+pub enum AsmBinaryOp {
+    Add,
+    Sub,
+    Mult,
+}
+
 #[derive(Debug, Clone)]
 pub enum AsmRegister {
     EAX,
+    EDX,
     R10d,
+    R11d,
 }
 
 #[derive(Debug)]
@@ -104,9 +118,72 @@ impl AsmProgram {
                     let asm_dst = self.to_asm_operand(dst);
                     self.emit_mov(asm_instructions, asm_src, asm_dst);
                     asm_instructions.push(AsmInstruction::Unary {
-                        unary_op: self.to_asm_unary_operator(op),
+                        op: self.to_asm_unary_operator(op),
                         operand: self.to_asm_operand(dst),
                     });
+                }
+                TacInstruction::Binary {
+                    op,
+                    src1,
+                    src2,
+                    dst,
+                } => {
+                    let asm_src1 = self.to_asm_operand(src1);
+                    let asm_src2 = self.to_asm_operand(src2);
+                    let asm_dst = self.to_asm_operand(dst);
+                    match op {
+                        TacBinaryOp::Divide => {
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_src1,
+                                AsmOperand::Reg(AsmRegister::EAX),
+                            );
+                            asm_instructions.push(AsmInstruction::Cdq);
+                            self.emit_idiv(asm_instructions, asm_src2);
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Reg(AsmRegister::EAX),
+                                asm_dst,
+                            );
+                        }
+                        TacBinaryOp::Remainder => {
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_src1,
+                                AsmOperand::Reg(AsmRegister::EAX),
+                            );
+                            asm_instructions.push(AsmInstruction::Cdq);
+                            self.emit_idiv(asm_instructions, asm_src2);
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Reg(AsmRegister::EDX),
+                                asm_dst,
+                            );
+                        }
+                        TacBinaryOp::Add => {
+                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
+                            self.emit_add(asm_instructions, asm_src2, asm_dst)
+                        }
+
+                        TacBinaryOp::Subtract => {
+                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
+                            self.emit_sub(asm_instructions, asm_src2, asm_dst)
+                        }
+
+                        TacBinaryOp::Multiply => {
+                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
+                            self.emit_imul(asm_instructions, asm_src2, asm_dst)
+                        }
+                        _ => {
+                            let asm_binary_op = self.to_asm_binary_operator(op);
+                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::Binary {
+                                op: asm_binary_op,
+                                left: asm_dst,
+                                right: asm_src2,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -136,6 +213,115 @@ impl AsmProgram {
         }
     }
 
+    // Avoid memory to memory operations
+    fn emit_idiv(&mut self, asm_instructions: &mut Vec<AsmInstruction>, operand: AsmOperand) {
+        if let AsmOperand::Imm(_) = &operand {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: operand,
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Idiv(tmp_reg));
+        } else {
+            asm_instructions.push(AsmInstruction::Idiv(operand))
+        }
+    }
+
+    // Avoid memory to memory operations
+    // add dst, src
+    fn emit_add(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        src: AsmOperand,
+        dst: AsmOperand,
+    ) {
+        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: src.clone(),
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Add,
+                left: dst,
+                right: tmp_reg,
+            });
+        } else {
+            // Direct move is fine
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Add,
+                left: dst,
+                right: src,
+            });
+        }
+    }
+
+    // Avoid memory to memory operations
+    // sub dst, src
+    fn emit_sub(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        src: AsmOperand,
+        dst: AsmOperand,
+    ) {
+        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: src.clone(),
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Sub,
+                left: dst,
+                right: tmp_reg,
+            });
+        } else {
+            // Direct move is fine
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Sub,
+                left: dst,
+                right: src,
+            });
+        }
+    }
+
+    // Avoid memory to memory operations
+    // imul dst, src
+    fn emit_imul(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        src: AsmOperand,
+        dst: AsmOperand,
+    ) {
+        if let AsmOperand::Stack(_) = &dst {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R11d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: dst.clone(),
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Mult,
+                left: tmp_reg.clone(),
+                right: src,
+            });
+            asm_instructions.push(AsmInstruction::Mov {
+                src: tmp_reg.clone(),
+                dst: dst.clone(),
+            });
+        } else {
+            // Direct move is fine
+            asm_instructions.push(AsmInstruction::Binary {
+                op: AsmBinaryOp::Mult,
+                left: dst,
+                right: src,
+            });
+        }
+    }
+
     fn to_asm_operand(&mut self, tac_operand: &TacOperand) -> AsmOperand {
         match tac_operand {
             TacOperand::Const(val) => AsmOperand::Imm(*val),
@@ -146,6 +332,19 @@ impl AsmProgram {
         match tac_op {
             TacUnaryOp::Complement => AsmUnaryOp::Not,
             TacUnaryOp::Negate => AsmUnaryOp::Neg,
+        }
+    }
+    fn to_asm_binary_operator(&mut self, tac_op: &TacBinaryOp) -> AsmBinaryOp {
+        match tac_op {
+            TacBinaryOp::Add => AsmBinaryOp::Add,
+            TacBinaryOp::Subtract => AsmBinaryOp::Sub,
+            TacBinaryOp::Multiply => AsmBinaryOp::Mult,
+            _ => {
+                panic!(
+                    "Unexpected operation in to_asm_binary_operator: {:?}",
+                    tac_op
+                );
+            }
         }
     }
 

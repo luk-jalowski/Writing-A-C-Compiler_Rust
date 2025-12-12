@@ -20,12 +20,22 @@ pub enum Statement {
 pub enum Expression {
     Constant(i32),
     UnaryExpr(UnaryOperator, Box<Expression>),
+    BinaryExp(Box<Expression>, BinaryOperator, Box<Expression>),
 }
 
 #[derive(Debug)]
 pub enum UnaryOperator {
     Complement,
     Negate,
+}
+
+#[derive(Debug)]
+pub enum BinaryOperator {
+    Addition,
+    Subtraction,
+    Multiplication,
+    Division,
+    Modulo,
 }
 
 pub struct Parser {
@@ -60,7 +70,7 @@ impl Parser {
     }
 
     pub fn parse_function(&mut self) -> Function {
-        self.expect(TokenType::KeywordInt);
+        self.expect_token(TokenType::KeywordInt);
 
         let name = match self.consume_token() {
             Some(token) => match token.token_type {
@@ -70,51 +80,77 @@ impl Parser {
             None => panic!("Unexpected EOF while parsing function name"),
         };
 
-        self.expect(TokenType::OpenParen);
-        self.expect(TokenType::KeywordVoid);
-        self.expect(TokenType::CloseParen);
+        self.expect_token(TokenType::OpenParen);
+        self.expect_token(TokenType::KeywordVoid);
+        self.expect_token(TokenType::CloseParen);
 
-        self.expect(TokenType::OpenBrace);
+        self.expect_token(TokenType::OpenBrace);
 
         let body = self.parse_statement();
 
-        self.expect(TokenType::CloseBrace);
+        self.expect_token(TokenType::CloseBrace);
 
         Function { name, body }
     }
 
     pub fn parse_statement(&mut self) -> Statement {
-        self.expect(TokenType::KeywordReturn);
-        let expr = self.parse_expression();
-        self.expect(TokenType::Semicolon);
+        self.expect_token(TokenType::KeywordReturn);
+        let expr = self.parse_expression(0);
+        self.expect_token(TokenType::Semicolon);
 
         Statement::Return(expr)
     }
 
-    pub fn parse_expression(&mut self) -> Expression {
+    pub fn parse_factor(&mut self) -> Expression {
         match self.consume_token() {
             Some(token) => match token.token_type {
                 TokenType::Integer(val) => Expression::Constant(val),
                 TokenType::Hyphen => {
-                    Expression::UnaryExpr(UnaryOperator::Negate, Box::new(self.parse_expression()))
+                    Expression::UnaryExpr(UnaryOperator::Negate, Box::new(self.parse_factor()))
                 }
-                TokenType::Tilde => Expression::UnaryExpr(
-                    UnaryOperator::Complement,
-                    Box::new(self.parse_expression()),
-                ),
+                TokenType::Tilde => {
+                    Expression::UnaryExpr(UnaryOperator::Complement, Box::new(self.parse_factor()))
+                }
                 TokenType::OpenParen => {
-                    let expr = self.parse_expression();
-                    self.expect(TokenType::CloseParen);
-                    expr
+                    let inner_expr = self.parse_expression(0);
+                    self.expect_token(TokenType::CloseParen);
+                    inner_expr
                 }
 
-                _ => panic!("Expected expression got {:?}", token),
+                _ => panic!("Expected factor got {:?}", token),
             },
-            None => panic!("Unexpected EOF while parsing expression"),
+            None => panic!("Unexpected EOF while parsing factor"),
         }
     }
 
-    pub fn expect(&mut self, expected: TokenType) {
+    pub fn parse_expression(&mut self, min_prec: u32) -> Expression {
+        let mut left = self.parse_factor();
+        while let Some(next_token) = self.peek_token() {
+            let op = match next_token.token_type {
+                TokenType::Plus => BinaryOperator::Addition,
+                TokenType::Hyphen => BinaryOperator::Subtraction,
+                TokenType::Asterisk => BinaryOperator::Multiplication,
+                TokenType::ForwardSlash => BinaryOperator::Division,
+                TokenType::Percent => BinaryOperator::Modulo,
+                _ => break,
+            };
+            let precedence: u32 = match next_token.token_type {
+                TokenType::Plus | TokenType::Hyphen => 45,
+                TokenType::Asterisk | TokenType::ForwardSlash | TokenType::Percent => 50,
+                _ => break,
+            };
+            if precedence < min_prec {
+                break;
+            }
+            self.consume_token();
+            let right = self.parse_expression(precedence + 1);
+            left = Expression::BinaryExp(Box::new(left), op, Box::new(right));
+        }
+
+        left
+    }
+
+    pub fn expect_token(&mut self, expected: TokenType) {
         match self.consume_token() {
             Some(token) => {
                 if std::mem::discriminant(&token.token_type) != std::mem::discriminant(&expected) {
@@ -123,6 +159,15 @@ impl Parser {
             }
             None => panic!("Expected {:?}, but found EOF", expected),
         }
+    }
+
+    pub fn peek_token(&mut self) -> Option<Token> {
+        if self.current_positon >= self.tokens.len() {
+            return None;
+        }
+
+        let token = self.tokens[self.current_positon].clone();
+        Some(token)
     }
 
     pub fn consume_token(&mut self) -> Option<Token> {

@@ -9,15 +9,17 @@ pub enum TokenType {
     KeywordVoid,
 
     // Single character tokens
-    OpenParen,  // (
-    CloseParen, // )
-    OpenBrace,  // {
-    CloseBrace, // }
-    Semicolon,  // ;
-    Tilde,      // ~
-    Hyphen,     // -
-
-    // Two char tokens
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBrace,    // {
+    CloseBrace,   // }
+    Semicolon,    // ;
+    Tilde,        // ~
+    Hyphen,       // -
+    Plus,         //+
+    Asterisk,     // *
+    ForwardSlash, // /
+    Percent,      // %
 
     // Literals
     Integer(i32),
@@ -88,7 +90,7 @@ impl<'a> Lexer<'a> {
                     self.chars.next();
                 }
                 '/' => {
-                    self.lex_forwardslash();
+                    self.lex_forwardslash(&mut tokens);
                 }
                 '-' => {
                     tokens.push(Token {
@@ -99,6 +101,24 @@ impl<'a> Lexer<'a> {
                 '~' => {
                     tokens.push(Token {
                         token_type: TokenType::Tilde,
+                    });
+                    self.chars.next();
+                }
+                '+' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Plus,
+                    });
+                    self.chars.next();
+                }
+                '*' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Asterisk,
+                    });
+                    self.chars.next();
+                }
+                '%' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Percent,
                     });
                     self.chars.next();
                 }
@@ -164,7 +184,7 @@ impl<'a> Lexer<'a> {
         word
     }
 
-    pub fn lex_forwardslash(&mut self) {
+    pub fn lex_forwardslash(&mut self, tokens: &mut Vec<Token>) {
         // Consume the first '/'
         self.chars.next();
 
@@ -193,9 +213,10 @@ impl<'a> Lexer<'a> {
                 }
             }
         } else {
-            // If it's not a comment, it's an unsupported single '/'
-            // In the future this could be a division operator token.
-            panic!("Unexpected character: /");
+            tokens.push(Token {
+                token_type: TokenType::ForwardSlash,
+            });
+            self.chars.next();
         }
     }
 }
