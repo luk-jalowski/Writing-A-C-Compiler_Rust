@@ -28,8 +28,22 @@ pub enum AsmInstruction {
         left: AsmOperand,
         right: AsmOperand,
     },
+    Cmp {
+        left: AsmOperand,
+        right: AsmOperand,
+    },
     Idiv(AsmOperand),
     Cdq,
+    Jmp(String),
+    JmpCC {
+        condition: AsmConditional,
+        target: String,
+    },
+    SetCC {
+        condition: AsmConditional,
+        operand: AsmOperand,
+    },
+    Label(String),
     AllocateStack(i32),
     Ret,
 }
@@ -60,6 +74,16 @@ pub enum AsmRegister {
     EDX,
     R10d,
     R11d,
+}
+
+#[derive(Debug)]
+pub enum AsmConditional {
+    Equal,
+    NotEqual,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
 }
 
 #[derive(Debug)]
@@ -116,11 +140,56 @@ impl AsmProgram {
                 TacInstruction::Unary { op, src, dst } => {
                     let asm_src = self.to_asm_operand(src);
                     let asm_dst = self.to_asm_operand(dst);
+
+                    if *op == TacUnaryOp::Not {
+                        self.emit_cmp(asm_instructions, asm_src, AsmOperand::Imm(0));
+                        self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                        asm_instructions.push(AsmInstruction::SetCC {
+                            condition: AsmConditional::Equal,
+                            operand: asm_dst,
+                        });
+                        continue;
+                    }
+
+                    let asm_op = match op {
+                        TacUnaryOp::Complement => AsmUnaryOp::Not,
+                        TacUnaryOp::Negate => AsmUnaryOp::Neg,
+                        _ => {
+                            panic!("Unsupported unary op {:?}", op);
+                        }
+                    };
                     self.emit_mov(asm_instructions, asm_src, asm_dst);
                     asm_instructions.push(AsmInstruction::Unary {
-                        op: self.to_asm_unary_operator(op),
+                        op: asm_op,
                         operand: self.to_asm_operand(dst),
                     });
+                }
+                TacInstruction::JumpIfZero { condition, target } => {
+                    let operand = self.to_asm_operand(condition);
+                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0));
+                    asm_instructions.push(AsmInstruction::JmpCC {
+                        condition: AsmConditional::Equal,
+                        target: target.clone(),
+                    });
+                }
+                TacInstruction::JumpIfNotZero { condition, target } => {
+                    let operand = self.to_asm_operand(condition);
+                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0));
+                    asm_instructions.push(AsmInstruction::JmpCC {
+                        condition: AsmConditional::NotEqual,
+                        target: target.clone(),
+                    });
+                }
+                TacInstruction::Jump { target } => {
+                    asm_instructions.push(AsmInstruction::Jmp(target.clone()));
+                }
+                TacInstruction::Label(name) => {
+                    asm_instructions.push(AsmInstruction::Label(name.clone()));
+                }
+                TacInstruction::Copy { src, dst } => {
+                    let asm_src = self.to_asm_operand(src);
+                    let asm_dst = self.to_asm_operand(dst);
+                    self.emit_mov(asm_instructions, asm_src, asm_dst);
                 }
                 TacInstruction::Binary {
                     op,
@@ -174,8 +243,69 @@ impl AsmProgram {
                             self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
                             self.emit_imul(asm_instructions, asm_src2, asm_dst)
                         }
+                        TacBinaryOp::EqualTo => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::Equal,
+                                operand: asm_dst,
+                            });
+                        }
+                        TacBinaryOp::NotEqualTo => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::NotEqual,
+                                operand: asm_dst,
+                            });
+                        }
+                        TacBinaryOp::LessThan => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::Less,
+                                operand: asm_dst,
+                            });
+                        }
+                        TacBinaryOp::GreaterThan => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::Greater,
+                                operand: asm_dst,
+                            });
+                        }
+                        TacBinaryOp::LessOrEqual => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::LessOrEqual,
+                                operand: asm_dst,
+                            });
+                        }
+                        TacBinaryOp::GreaterOrEqual => {
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+
+                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            asm_instructions.push(AsmInstruction::SetCC {
+                                condition: AsmConditional::GreaterOrEqual,
+                                operand: asm_dst,
+                            });
+                        }
                         _ => {
-                            let asm_binary_op = self.to_asm_binary_operator(op);
+                            let asm_binary_op = match op {
+                                TacBinaryOp::Add => AsmBinaryOp::Add,
+                                TacBinaryOp::Subtract => AsmBinaryOp::Sub,
+                                TacBinaryOp::Multiply => AsmBinaryOp::Mult,
+                                _ => {
+                                    panic!("Unexpected binary operation encountered: {:?}", op);
+                                }
+                            };
                             self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
                             asm_instructions.push(AsmInstruction::Binary {
                                 op: asm_binary_op,
@@ -184,6 +314,9 @@ impl AsmProgram {
                             });
                         }
                     }
+                }
+                _ => {
+                    panic!("Unsupported instruction {:?}", tac_instruction);
                 }
             }
         }
@@ -322,29 +455,43 @@ impl AsmProgram {
         }
     }
 
+    fn emit_cmp(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        left: AsmOperand,
+        right: AsmOperand,
+    ) {
+        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&left, &right) {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: right.clone(),
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Cmp {
+                left,
+                right: tmp_reg.clone(),
+            });
+        } else if let (AsmOperand::Imm(_)) = (&left) {
+            // Use R10 as a temporary register for mem-to-mem moves
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R11d);
+            asm_instructions.push(AsmInstruction::Mov {
+                src: left.clone(),
+                dst: tmp_reg.clone(),
+            });
+            asm_instructions.push(AsmInstruction::Cmp {
+                left: tmp_reg.clone(),
+                right,
+            });
+        } else {
+            asm_instructions.push(AsmInstruction::Cmp { left, right });
+        }
+    }
+
     fn to_asm_operand(&mut self, tac_operand: &TacOperand) -> AsmOperand {
         match tac_operand {
             TacOperand::Const(val) => AsmOperand::Imm(*val),
             TacOperand::Var(val) => AsmOperand::Stack(self.get_var_offset(val)),
-        }
-    }
-    fn to_asm_unary_operator(&mut self, tac_op: &TacUnaryOp) -> AsmUnaryOp {
-        match tac_op {
-            TacUnaryOp::Complement => AsmUnaryOp::Not,
-            TacUnaryOp::Negate => AsmUnaryOp::Neg,
-        }
-    }
-    fn to_asm_binary_operator(&mut self, tac_op: &TacBinaryOp) -> AsmBinaryOp {
-        match tac_op {
-            TacBinaryOp::Add => AsmBinaryOp::Add,
-            TacBinaryOp::Subtract => AsmBinaryOp::Sub,
-            TacBinaryOp::Multiply => AsmBinaryOp::Mult,
-            _ => {
-                panic!(
-                    "Unexpected operation in to_asm_binary_operator: {:?}",
-                    tac_op
-                );
-            }
         }
     }
 

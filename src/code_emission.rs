@@ -1,7 +1,8 @@
-use std::ops;
+use core::panic;
 
 use crate::code_gen::{
-    AsmAst, AsmBinaryOp, AsmFunction, AsmInstruction, AsmOperand, AsmRegister, AsmUnaryOp,
+    AsmAst, AsmBinaryOp, AsmConditional, AsmFunction, AsmInstruction, AsmOperand, AsmRegister,
+    AsmUnaryOp,
 };
 
 pub struct CodeEmission {}
@@ -57,7 +58,7 @@ impl CodeEmission {
                     asm_code.push(format!("\tpop rbp\n"));
                     asm_code.push(format!("\tret\n"));
                 }
-                AsmInstruction::Unary { op: op, operand } => {
+                AsmInstruction::Unary { op, operand } => {
                     asm_code.push(format!(
                         "\t{} {}\n",
                         self.asm_unary_operator_to_string(op),
@@ -77,6 +78,40 @@ impl CodeEmission {
                 }
                 AsmInstruction::Cdq => {
                     asm_code.push(format!("\tcdq\n"));
+                }
+                AsmInstruction::Cmp { left, right } => {
+                    asm_code.push(format!(
+                        "\tcmp {}, {}\n",
+                        self.asm_operand_to_string(left),
+                        self.asm_operand_to_string(right)
+                    ));
+                }
+                AsmInstruction::Label(label) => {
+                    asm_code.push(format!(".{}:\n", label.clone()));
+                }
+                AsmInstruction::Jmp(label) => {
+                    asm_code.push(format!("jmp .{}\n", label.clone()));
+                }
+                AsmInstruction::JmpCC { condition, target } => {
+                    let cc = self.asm_conditional_to_string(condition);
+                    asm_code.push(format!("j{} .{}\n", cc.clone(), target.clone()));
+                }
+                AsmInstruction::SetCC { condition, operand } => {
+                    let cc = self.asm_conditional_to_string(condition);
+                    let operand_str = match operand {
+                        AsmOperand::Stack(val) => format!("BYTE PTR [rbp - {}]", val.abs()),
+                        AsmOperand::Reg(reg) => match reg {
+                            AsmRegister::EAX => "al".to_string(),
+                            AsmRegister::EDX => "dl".to_string(),
+                            AsmRegister::R10d => "r10b".to_string(),
+                            AsmRegister::R11d => "r11b".to_string(),
+                        },
+                        _ => panic!("Invalid operand for SetCC: {:?}", operand),
+                    };
+                    asm_code.push(format!("set{} {}\n", cc.clone(), operand_str));
+                }
+                _ => {
+                    panic!("Unexpected instruction encountered: {:?}", asm_instructions);
                 }
             }
         }
@@ -111,6 +146,16 @@ impl CodeEmission {
             AsmRegister::EDX => "edx".to_string(),
             AsmRegister::R10d => "r10d".to_string(),
             AsmRegister::R11d => "r11d".to_string(),
+        }
+    }
+    pub fn asm_conditional_to_string(&mut self, asm_cc: &AsmConditional) -> String {
+        match asm_cc {
+            AsmConditional::Equal => "e".to_string(),
+            AsmConditional::NotEqual => "ne".to_string(),
+            AsmConditional::Less => "l".to_string(),
+            AsmConditional::LessOrEqual => "le".to_string(),
+            AsmConditional::Greater => "g".to_string(),
+            AsmConditional::GreaterOrEqual => "ge".to_string(),
         }
     }
 }

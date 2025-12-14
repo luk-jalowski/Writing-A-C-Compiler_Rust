@@ -26,6 +26,22 @@ pub enum TacInstruction {
         src2: TacOperand,
         dst: TacOperand,
     },
+    Copy {
+        src: TacOperand,
+        dst: TacOperand,
+    },
+    Jump {
+        target: String,
+    },
+    JumpIfZero {
+        condition: TacOperand,
+        target: String,
+    },
+    JumpIfNotZero {
+        condition: TacOperand,
+        target: String,
+    },
+    Label(String),
 }
 
 #[derive(Debug, Clone)]
@@ -34,10 +50,11 @@ pub enum TacOperand {
     Const(i32),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum TacUnaryOp {
     Complement,
     Negate,
+    Not,
 }
 
 #[derive(Debug)]
@@ -47,23 +64,38 @@ pub enum TacBinaryOp {
     Multiply,
     Divide,
     Remainder,
+    EqualTo,
+    NotEqualTo,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
 }
 
 #[derive(Debug)]
 pub struct TacProgram {
-    // pub tac_instructions: Vec<TacInstruction>,
     var_counter: usize,
+    label_counter: usize,
 }
 
 impl TacProgram {
     pub fn new() -> Self {
-        TacProgram { var_counter: 0 }
+        TacProgram {
+            var_counter: 0,
+            label_counter: 0,
+        }
     }
 
     fn new_temp_var(&mut self) -> TacOperand {
         let tmp = format!("tmp.{}", self.var_counter);
         self.var_counter += 1;
         TacOperand::Var(tmp.to_string())
+    }
+
+    fn new_label_(&mut self) -> String {
+        let label = format!("L{}", self.label_counter);
+        self.label_counter += 1;
+        label
     }
 
     pub fn generate_tac(&mut self, ast: AST) -> TacAst {
@@ -109,6 +141,10 @@ impl TacProgram {
                 let tac_op = match op {
                     UnaryOperator::Complement => TacUnaryOp::Complement,
                     UnaryOperator::Negate => TacUnaryOp::Negate,
+                    UnaryOperator::Not => TacUnaryOp::Not,
+                    _ => {
+                        panic!("Unsupported operator in tac {:?}", op);
+                    }
                 };
 
                 tac_instructions.push(TacInstruction::Unary {
@@ -119,8 +155,80 @@ impl TacProgram {
                 dst
             }
             Expression::BinaryExp(left, op, right) => {
-                let src1 = self.parse_expression(*left, tac_instructions);
-                let src2 = self.parse_expression(*right, tac_instructions);
+                // First handle short-circuting logical operators AND OR
+                match op {
+                    BinaryOperator::And => {
+                        let false_label = self.new_label_();
+                        let end_label = self.new_label_();
+                        let dst = self.new_temp_var();
+
+                        let src_left = self.parse_expression(*left, tac_instructions);
+
+                        tac_instructions.push(TacInstruction::JumpIfZero {
+                            condition: src_left,
+                            target: false_label.clone(),
+                        });
+                        let src_right = self.parse_expression(*right, tac_instructions);
+                        tac_instructions.push(TacInstruction::JumpIfZero {
+                            condition: src_right,
+                            target: false_label.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Copy {
+                            src: TacOperand::Const(1),
+                            dst: dst.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Jump {
+                            target: end_label.clone(),
+                        });
+
+                        tac_instructions.push(TacInstruction::Label(false_label));
+
+                        tac_instructions.push(TacInstruction::Copy {
+                            src: TacOperand::Const(0),
+                            dst: dst.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Label(end_label));
+
+                        return dst;
+                    }
+                    BinaryOperator::Or => {
+                        let true_label = self.new_label_();
+                        let end_label = self.new_label_();
+                        let dst = self.new_temp_var();
+
+                        let src_left = self.parse_expression(*left, tac_instructions);
+
+                        tac_instructions.push(TacInstruction::JumpIfNotZero {
+                            condition: src_left,
+                            target: true_label.clone(),
+                        });
+                        let src_right = self.parse_expression(*right, tac_instructions);
+                        tac_instructions.push(TacInstruction::JumpIfNotZero {
+                            condition: src_right,
+                            target: true_label.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Copy {
+                            src: TacOperand::Const(0),
+                            dst: dst.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Jump {
+                            target: end_label.clone(),
+                        });
+
+                        tac_instructions.push(TacInstruction::Label(true_label));
+
+                        tac_instructions.push(TacInstruction::Copy {
+                            src: TacOperand::Const(1),
+                            dst: dst.clone(),
+                        });
+                        tac_instructions.push(TacInstruction::Label(end_label));
+
+                        return dst;
+                    }
+                    _ => {}
+                }
+                let src_left = self.parse_expression(*left, tac_instructions);
+                let src_right = self.parse_expression(*right, tac_instructions);
                 let dst = self.new_temp_var();
 
                 let tac_op = match op {
@@ -129,11 +237,20 @@ impl TacProgram {
                     BinaryOperator::Multiplication => TacBinaryOp::Multiply,
                     BinaryOperator::Division => TacBinaryOp::Divide,
                     BinaryOperator::Modulo => TacBinaryOp::Remainder,
+                    BinaryOperator::EqualTo => TacBinaryOp::EqualTo,
+                    BinaryOperator::NotEqualTo => TacBinaryOp::NotEqualTo,
+                    BinaryOperator::LessThan => TacBinaryOp::LessThan,
+                    BinaryOperator::LessOrEqual => TacBinaryOp::LessOrEqual,
+                    BinaryOperator::GreaterThan => TacBinaryOp::GreaterThan,
+                    BinaryOperator::GreaterOrEqual => TacBinaryOp::GreaterOrEqual,
+                    _ => {
+                        panic!("Unsupported binary operator in TAC {:?}", op);
+                    }
                 };
                 tac_instructions.push(TacInstruction::Binary {
                     op: tac_op,
-                    src1,
-                    src2,
+                    src1: src_left,
+                    src2: src_right,
                     dst: dst.clone(),
                 });
 

@@ -71,7 +71,6 @@ fn main() {
     let asm_ast = asm_program.generate_assembly(tac_ast);
     println!("Generated assembly instructions {:?}", asm_ast);
 
-    //
 
     if args.codegen {
         return;
@@ -79,14 +78,12 @@ fn main() {
     let mut code_emit = CodeEmission::new();
     let output_code = code_emit.generate_code(&asm_ast);
 
-    // let output_code = CodeEmission::generate_code(&mut self, &asm_ast);
 
     let asm_output_path = input_path.with_extension("s");
     let bin_output_path = input_path.with_extension("");
 
     let mut file = File::create(&asm_output_path).expect("Unable to create file");
     for line in &output_code {
-        // writeln! macro handles the formatted output and appends a newline
         let _ = write!(file, "{}", line);
     }
     let _ = Command::new("gcc")

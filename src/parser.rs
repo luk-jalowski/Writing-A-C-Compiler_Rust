@@ -27,6 +27,7 @@ pub enum Expression {
 pub enum UnaryOperator {
     Complement,
     Negate,
+    Not,
 }
 
 #[derive(Debug)]
@@ -36,6 +37,14 @@ pub enum BinaryOperator {
     Multiplication,
     Division,
     Modulo,
+    And,
+    Or,
+    EqualTo,
+    NotEqualTo,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
 }
 
 pub struct Parser {
@@ -111,6 +120,9 @@ impl Parser {
                 TokenType::Tilde => {
                     Expression::UnaryExpr(UnaryOperator::Complement, Box::new(self.parse_factor()))
                 }
+                TokenType::Not => {
+                    Expression::UnaryExpr(UnaryOperator::Not, Box::new(self.parse_factor()))
+                }
                 TokenType::OpenParen => {
                     let inner_expr = self.parse_expression(0);
                     self.expect_token(TokenType::CloseParen);
@@ -132,11 +144,26 @@ impl Parser {
                 TokenType::Asterisk => BinaryOperator::Multiplication,
                 TokenType::ForwardSlash => BinaryOperator::Division,
                 TokenType::Percent => BinaryOperator::Modulo,
+                TokenType::And => BinaryOperator::And,
+                TokenType::Or => BinaryOperator::Or,
+                TokenType::EqualTo => BinaryOperator::EqualTo,
+                TokenType::NotEqualTo => BinaryOperator::NotEqualTo,
+                TokenType::LessThan => BinaryOperator::LessThan,
+                TokenType::LessOrEqual => BinaryOperator::LessOrEqual,
+                TokenType::GreaterThan => BinaryOperator::GreaterThan,
+                TokenType::GreaterOrEqual => BinaryOperator::GreaterOrEqual,
                 _ => break,
             };
             let precedence: u32 = match next_token.token_type {
-                TokenType::Plus | TokenType::Hyphen => 45,
                 TokenType::Asterisk | TokenType::ForwardSlash | TokenType::Percent => 50,
+                TokenType::Plus | TokenType::Hyphen => 45,
+                TokenType::LessThan
+                | TokenType::LessOrEqual
+                | TokenType::GreaterThan
+                | TokenType::GreaterOrEqual => 35,
+                TokenType::EqualTo | TokenType::NotEqualTo => 30,
+                TokenType::And => 10,
+                TokenType::Or => 5,
                 _ => break,
             };
             if precedence < min_prec {

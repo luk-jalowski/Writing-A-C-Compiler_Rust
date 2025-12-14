@@ -1,3 +1,4 @@
+use core::panic;
 use std::iter::Peekable;
 use std::str::Chars;
 
@@ -16,10 +17,21 @@ pub enum TokenType {
     Semicolon,    // ;
     Tilde,        // ~
     Hyphen,       // -
-    Plus,         //+
+    Plus,         // +
     Asterisk,     // *
     ForwardSlash, // /
     Percent,      // %
+
+    // Logical operators
+    Not,            // !
+    And,            // &&
+    Or,             // ||
+    EqualTo,        // ==
+    NotEqualTo,     // !=
+    LessThan,       // <
+    GreaterThan,    // <
+    LessOrEqual,    // <=
+    GreaterOrEqual, // >=
 
     // Literals
     Integer(i32),
@@ -122,6 +134,87 @@ impl<'a> Lexer<'a> {
                     });
                     self.chars.next();
                 }
+                '!' => {
+                    self.chars.next();
+                    if Some('=') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::NotEqualTo,
+                        });
+                        self.chars.next();
+                    } else {
+                        tokens.push(Token {
+                            token_type: TokenType::Not,
+                        });
+                    }
+                }
+                '&' => {
+                    self.chars.next();
+                    if Some('&') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::And,
+                        });
+                        self.chars.next();
+                    }
+                    //TODO Single appersand support
+                }
+                '|' => {
+                    self.chars.next();
+                    if Some('|') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::Or,
+                        });
+                        self.chars.next();
+                    } else {
+                        panic!("Single | not supported!");
+                    }
+                }
+                '=' => {
+                    self.chars.next();
+                    if Some('=') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::EqualTo,
+                        });
+                        self.chars.next();
+                    } else {
+                        panic!("Single = not supported!");
+                    }
+                }
+                '<' => {
+                    self.chars.next();
+                    if Some('=') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::LessOrEqual,
+                        });
+                        self.chars.next();
+                    } else {
+                        tokens.push(Token {
+                            token_type: TokenType::LessThan,
+                        });
+                    }
+                }
+                '>' => {
+                    self.chars.next();
+                    if Some('=') == self.chars.peek().copied() {
+                        tokens.push(Token {
+                            token_type: TokenType::GreaterOrEqual,
+                        });
+                        self.chars.next();
+                    } else {
+                        tokens.push(Token {
+                            token_type: TokenType::GreaterThan,
+                        });
+                    }
+                }
+                '#' => {
+                    // Dirty workaround for the test sets containing #pragma and #include for some reason at this stage....
+                    while let Some(&c) = self.chars.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.chars.next();
+                    }
+                }
+
                 '0'..='9' => {
                     let num = self.lex_integer();
                     tokens.push(Token {
