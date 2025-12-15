@@ -21,6 +21,7 @@ pub enum TokenType {
     Asterisk,     // *
     ForwardSlash, // /
     Percent,      // %
+    Assignment,   // =
 
     // Logical operators
     Not,            // !
@@ -176,7 +177,9 @@ impl<'a> Lexer<'a> {
                         });
                         self.chars.next();
                     } else {
-                        panic!("Single = not supported!");
+                        tokens.push(Token {
+                            token_type: TokenType::Assignment,
+                        });
                     }
                 }
                 '<' => {

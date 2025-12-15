@@ -2,12 +2,13 @@ use clap::Parser as clapParser;
 use std::{fs, os::unix::process::CommandExt, path::Path, process::Command};
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{Write};
 
 pub mod code_emission;
 pub mod code_gen;
 pub mod lexer;
 pub mod parser;
+pub mod semantic_validation;
 pub mod tac;
 
 use crate::code_emission::CodeEmission;
@@ -15,6 +16,7 @@ use crate::code_emission::CodeEmission;
 use crate::code_gen::AsmProgram;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::semantic_validation::SemanticValidation;
 use crate::tac::TacProgram;
 
 /// A Rust-based C compiler
@@ -28,6 +30,9 @@ struct Args {
 
     #[arg(long)]
     parse: bool,
+
+    #[arg(long)]
+    validate: bool,
 
     #[arg(long)]
     tacky: bool,
@@ -52,14 +57,22 @@ fn main() {
     }
 
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse().unwrap();
-    println!("Parser {:?}", ast);
+    let mut ast = parser.parse().unwrap();
+    println!("Parser \n{:?}", ast);
 
     if args.parse {
         return;
     }
 
-    let mut tac_program = TacProgram::new();
+    let mut semantic_validation = SemanticValidation::new();
+    semantic_validation.validate(&mut ast);
+    println!("Parser after validation \n{:?}", ast);
+
+    if args.validate {
+        return;
+    }
+
+    let mut tac_program = TacProgram::new(semantic_validation.var_counter, 0);
     let tac_ast = tac_program.generate_tac(ast);
     println!("Generated TAC representation:\n {:?}", tac_ast);
 
@@ -71,13 +84,11 @@ fn main() {
     let asm_ast = asm_program.generate_assembly(tac_ast);
     println!("Generated assembly instructions {:?}", asm_ast);
 
-
     if args.codegen {
         return;
     }
     let mut code_emit = CodeEmission::new();
     let output_code = code_emit.generate_code(&asm_ast);
-
 
     let asm_output_path = input_path.with_extension("s");
     let bin_output_path = input_path.with_extension("");

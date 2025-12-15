@@ -1,3 +1,5 @@
+use core::panic;
+
 use crate::lexer::{Token, TokenType};
 
 #[derive(Debug)]
@@ -8,19 +10,35 @@ pub enum AST {
 #[derive(Debug)]
 pub struct Function {
     pub name: String, // identifier
-    pub body: Statement,
+    pub body: Vec<BlockItem>,
+}
+
+#[derive(Debug)]
+pub enum BlockItem {
+    Statement(Statement),
+    Declaration(Declaration),
 }
 
 #[derive(Debug)]
 pub enum Statement {
     Return(Expression),
+    Expression(Expression),
+    Null,
+}
+
+#[derive(Debug)]
+pub struct Declaration {
+    pub name: String,
+    pub init: Option<Expression>,
 }
 
 #[derive(Debug)]
 pub enum Expression {
     Constant(i32),
+    Var(String),
     UnaryExpr(UnaryOperator, Box<Expression>),
     BinaryExp(Box<Expression>, BinaryOperator, Box<Expression>),
+    Assignment(Box<Expression>, Box<Expression>),
 }
 
 #[derive(Debug)]
@@ -30,8 +48,9 @@ pub enum UnaryOperator {
     Not,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum BinaryOperator {
+    Assignment,
     Addition,
     Subtraction,
     Multiplication,
@@ -95,19 +114,69 @@ impl Parser {
 
         self.expect_token(TokenType::OpenBrace);
 
-        let body = self.parse_statement();
+        let mut function_body: Vec<BlockItem> = Vec::new();
 
-        self.expect_token(TokenType::CloseBrace);
+        // let body = self.parse_statement();
 
-        Function { name, body }
+        // self.expect_token(TokenType::CloseBrace);
+
+        while TokenType::CloseBrace != self.peek_token().unwrap().token_type {
+            let block_item = self.parse_block_statement();
+            function_body.push(block_item);
+        }
+        self.consume_token();
+
+        Function {
+            name,
+            body: function_body,
+        }
+    }
+
+    pub fn parse_block_statement(&mut self) -> BlockItem {
+        match self.peek_token().map(|t| t.token_type) {
+            Some(TokenType::KeywordInt) => {
+                self.consume_token();
+                let name = match self.consume_token() {
+                    Some(token) => match token.token_type {
+                        TokenType::Identifier(name) => name,
+                        _ => panic!("Expected identifier after int keyword!"),
+                    },
+                    None => panic!("Unexpected end of tokens!"),
+                };
+
+                let init =
+                    if let Some(TokenType::Assignment) = self.peek_token().map(|t| t.token_type) {
+                        self.consume_token();
+                        Some(self.parse_expression(0))
+                    } else {
+                        None
+                    };
+
+                self.expect_token(TokenType::Semicolon);
+                BlockItem::Declaration(Declaration { name, init })
+            }
+            _ => BlockItem::Statement(self.parse_statement()),
+        }
     }
 
     pub fn parse_statement(&mut self) -> Statement {
-        self.expect_token(TokenType::KeywordReturn);
-        let expr = self.parse_expression(0);
-        self.expect_token(TokenType::Semicolon);
-
-        Statement::Return(expr)
+        match self.peek_token().map(|t| t.token_type) {
+            Some(TokenType::KeywordReturn) => {
+                self.consume_token();
+                let expr = self.parse_expression(0);
+                self.expect_token(TokenType::Semicolon);
+                Statement::Return(expr)
+            }
+            Some(TokenType::Semicolon) => {
+                self.consume_token();
+                Statement::Null
+            }
+            _ => {
+                let expr = self.parse_expression(0);
+                self.expect_token(TokenType::Semicolon);
+                Statement::Expression(expr)
+            }
+        }
     }
 
     pub fn parse_factor(&mut self) -> Expression {
@@ -128,6 +197,7 @@ impl Parser {
                     self.expect_token(TokenType::CloseParen);
                     inner_expr
                 }
+                TokenType::Identifier(name) => Expression::Var(name),
 
                 _ => panic!("Expected factor got {:?}", token),
             },
@@ -152,6 +222,7 @@ impl Parser {
                 TokenType::LessOrEqual => BinaryOperator::LessOrEqual,
                 TokenType::GreaterThan => BinaryOperator::GreaterThan,
                 TokenType::GreaterOrEqual => BinaryOperator::GreaterOrEqual,
+                TokenType::Assignment => BinaryOperator::Assignment,
                 _ => break,
             };
             let precedence: u32 = match next_token.token_type {
@@ -164,14 +235,20 @@ impl Parser {
                 TokenType::EqualTo | TokenType::NotEqualTo => 30,
                 TokenType::And => 10,
                 TokenType::Or => 5,
+                TokenType::Assignment => 1,
                 _ => break,
             };
             if precedence < min_prec {
                 break;
             }
             self.consume_token();
-            let right = self.parse_expression(precedence + 1);
-            left = Expression::BinaryExp(Box::new(left), op, Box::new(right));
+            if op == BinaryOperator::Assignment {
+                let right = self.parse_expression(precedence);
+                left = Expression::Assignment(Box::new(left), Box::new(right));
+            } else {
+                let right = self.parse_expression(precedence + 1);
+                left = Expression::BinaryExp(Box::new(left), op, Box::new(right));
+            }
         }
 
         left

@@ -1,6 +1,8 @@
 use core::panic;
 
-use crate::parser::{AST, BinaryOperator, Expression, Function, Statement, UnaryOperator};
+use crate::parser::{
+    AST, BinaryOperator, BlockItem, Declaration, Expression, Function, Statement, UnaryOperator,
+};
 
 #[derive(Debug)]
 pub enum TacAst {
@@ -79,10 +81,10 @@ pub struct TacProgram {
 }
 
 impl TacProgram {
-    pub fn new() -> Self {
+    pub fn new(var_counter: usize, label_counter: usize) -> Self {
         TacProgram {
-            var_counter: 0,
-            label_counter: 0,
+            var_counter,
+            label_counter,
         }
     }
 
@@ -107,11 +109,45 @@ impl TacProgram {
     fn parse_function(&mut self, function: Function) -> TacFunction {
         let mut tac_instructions: Vec<TacInstruction> = Vec::new();
 
-        self.parse_statement(function.body, &mut tac_instructions);
+        for block_item in function.body {
+            self.parse_block_item(block_item, &mut tac_instructions);
+        }
+
+        // Add 0 if there is no implicit return
+        if !matches!(tac_instructions.last(), Some(TacInstruction::Ret(_))) {
+            tac_instructions.push(TacInstruction::Ret(TacOperand::Const(0)));
+        }
 
         TacFunction {
             name: function.name,
             body: tac_instructions,
+        }
+    }
+
+    fn parse_block_item(
+        &mut self,
+        block_item: BlockItem,
+        tac_instructions: &mut Vec<TacInstruction>,
+    ) {
+        match block_item {
+            BlockItem::Statement(statement) => self.parse_statement(statement, tac_instructions),
+            BlockItem::Declaration(declaration) => {
+                self.parse_declaration(declaration, tac_instructions)
+            }
+        }
+    }
+
+    fn parse_declaration(
+        &mut self,
+        declaration: Declaration,
+        tac_instructions: &mut Vec<TacInstruction>,
+    ) {
+        if let Some(expr) = declaration.init {
+            let src = self.parse_expression(expr, tac_instructions);
+            tac_instructions.push(TacInstruction::Copy {
+                src,
+                dst: TacOperand::Var(declaration.name),
+            });
         }
     }
 
@@ -125,6 +161,10 @@ impl TacProgram {
                 let result_operand = self.parse_expression(expr, tac_instructions);
                 tac_instructions.push(TacInstruction::Ret(result_operand));
             }
+            Statement::Expression(expr) => {
+                self.parse_expression(expr, tac_instructions);
+            }
+            Statement::Null => {}
         }
     }
 
@@ -255,6 +295,20 @@ impl TacProgram {
                 });
 
                 dst
+            }
+            Expression::Var(name) => TacOperand::Var(name),
+            Expression::Assignment(left, right) => {
+                let src_right = self.parse_expression(*right, tac_instructions);
+
+                if let Expression::Var(name) = *left {
+                    tac_instructions.push(TacInstruction::Copy {
+                        src: src_right.clone(),
+                        dst: TacOperand::Var(name),
+                    });
+                    src_right
+                } else {
+                    panic!("Expected lvalue for assignment");
+                }
             }
         }
     }
