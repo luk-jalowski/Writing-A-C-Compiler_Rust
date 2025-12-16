@@ -88,6 +88,15 @@ impl SemanticValidation {
                 self.resolve_expression(left);
                 self.resolve_expression(right);
             }
+            Expression::Conditional {
+                condition,
+                exp1,
+                exp2,
+            } => {
+                self.resolve_expression(condition);
+                self.resolve_expression(exp1);
+                self.resolve_expression(exp2);
+            }
         }
     }
 
@@ -96,6 +105,17 @@ impl SemanticValidation {
             Statement::Expression(expr) => self.resolve_expression(expr),
             Statement::Return(expr) => self.resolve_expression(expr),
             Statement::Null => {}
+            Statement::If {
+                exp,
+                then,
+                else_statement,
+            } => {
+                self.resolve_expression(exp);
+                self.resolve_statement(then);
+                if let Some(else_stm) = else_statement {
+                    self.resolve_statement(else_stm);
+                }
+            }
         }
     }
 }

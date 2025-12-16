@@ -23,6 +23,11 @@ pub enum BlockItem {
 pub enum Statement {
     Return(Expression),
     Expression(Expression),
+    If {
+        exp: Expression,
+        then: Box<Statement>,
+        else_statement: Option<Box<Statement>>,
+    },
     Null,
 }
 
@@ -39,6 +44,11 @@ pub enum Expression {
     UnaryExpr(UnaryOperator, Box<Expression>),
     BinaryExp(Box<Expression>, BinaryOperator, Box<Expression>),
     Assignment(Box<Expression>, Box<Expression>),
+    Conditional {
+        condition: Box<Expression>,
+        exp1: Box<Expression>,
+        exp2: Box<Expression>,
+    },
 }
 
 #[derive(Debug)]
@@ -64,6 +74,8 @@ pub enum BinaryOperator {
     LessOrEqual,
     GreaterThan,
     GreaterOrEqual,
+    QuestionMark,
+    Colon,
 }
 
 pub struct Parser {
@@ -171,6 +183,28 @@ impl Parser {
                 self.consume_token();
                 Statement::Null
             }
+            Some(TokenType::KeywordIf) => {
+                self.consume_token();
+                self.expect_token(TokenType::OpenParen);
+                let if_condition = self.parse_expression(0);
+                self.expect_token(TokenType::CloseParen);
+
+                let if_statement = self.parse_statement();
+                // Optional else
+                let else_statement =
+                    if let Some(TokenType::KeywordElse) = self.peek_token().map(|t| t.token_type) {
+                        self.consume_token();
+                        Some(Box::new(self.parse_statement()))
+                    } else {
+                        None
+                    };
+
+                Statement::If {
+                    exp: if_condition,
+                    then: Box::new(if_statement),
+                    else_statement,
+                }
+            }
             _ => {
                 let expr = self.parse_expression(0);
                 self.expect_token(TokenType::Semicolon);
@@ -208,23 +242,6 @@ impl Parser {
     pub fn parse_expression(&mut self, min_prec: u32) -> Expression {
         let mut left = self.parse_factor();
         while let Some(next_token) = self.peek_token() {
-            let op = match next_token.token_type {
-                TokenType::Plus => BinaryOperator::Addition,
-                TokenType::Hyphen => BinaryOperator::Subtraction,
-                TokenType::Asterisk => BinaryOperator::Multiplication,
-                TokenType::ForwardSlash => BinaryOperator::Division,
-                TokenType::Percent => BinaryOperator::Modulo,
-                TokenType::And => BinaryOperator::And,
-                TokenType::Or => BinaryOperator::Or,
-                TokenType::EqualTo => BinaryOperator::EqualTo,
-                TokenType::NotEqualTo => BinaryOperator::NotEqualTo,
-                TokenType::LessThan => BinaryOperator::LessThan,
-                TokenType::LessOrEqual => BinaryOperator::LessOrEqual,
-                TokenType::GreaterThan => BinaryOperator::GreaterThan,
-                TokenType::GreaterOrEqual => BinaryOperator::GreaterOrEqual,
-                TokenType::Assignment => BinaryOperator::Assignment,
-                _ => break,
-            };
             let precedence: u32 = match next_token.token_type {
                 TokenType::Asterisk | TokenType::ForwardSlash | TokenType::Percent => 50,
                 TokenType::Plus | TokenType::Hyphen => 45,
@@ -235,6 +252,7 @@ impl Parser {
                 TokenType::EqualTo | TokenType::NotEqualTo => 30,
                 TokenType::And => 10,
                 TokenType::Or => 5,
+                TokenType::QuestionMark => 3,
                 TokenType::Assignment => 1,
                 _ => break,
             };
@@ -242,10 +260,41 @@ impl Parser {
                 break;
             }
             self.consume_token();
-            if op == BinaryOperator::Assignment {
+            if next_token.token_type == TokenType::Assignment {
                 let right = self.parse_expression(precedence);
                 left = Expression::Assignment(Box::new(left), Box::new(right));
+            } else if next_token.token_type == TokenType::QuestionMark {
+                // Parse middle expression of ? <exp> : <exp> until :
+                let middle = self.parse_expression(0);
+                self.expect_token(TokenType::Colon);
+
+                // right is after :
+                let right = self.parse_expression(precedence);
+
+                // left = Expression::Assignment(Box::new(left), Box::new(right));
+                left = Expression::Conditional {
+                    condition: Box::new(left),
+                    exp1: Box::new(middle),
+                    exp2: Box::new(right),
+                };
             } else {
+                let op: BinaryOperator = match next_token.token_type {
+                    TokenType::Plus => BinaryOperator::Addition,
+                    TokenType::Hyphen => BinaryOperator::Subtraction,
+                    TokenType::Asterisk => BinaryOperator::Multiplication,
+                    TokenType::ForwardSlash => BinaryOperator::Division,
+                    TokenType::Percent => BinaryOperator::Modulo,
+                    TokenType::And => BinaryOperator::And,
+                    TokenType::Or => BinaryOperator::Or,
+                    TokenType::EqualTo => BinaryOperator::EqualTo,
+                    TokenType::NotEqualTo => BinaryOperator::NotEqualTo,
+                    TokenType::LessThan => BinaryOperator::LessThan,
+                    TokenType::LessOrEqual => BinaryOperator::LessOrEqual,
+                    TokenType::GreaterThan => BinaryOperator::GreaterThan,
+                    TokenType::GreaterOrEqual => BinaryOperator::GreaterOrEqual,
+                    _ => break,
+                };
+
                 let right = self.parse_expression(precedence + 1);
                 left = Expression::BinaryExp(Box::new(left), op, Box::new(right));
             }

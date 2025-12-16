@@ -94,7 +94,7 @@ impl TacProgram {
         TacOperand::Var(tmp.to_string())
     }
 
-    fn new_label_(&mut self) -> String {
+    fn new_label(&mut self) -> String {
         let label = format!("L{}", self.label_counter);
         self.label_counter += 1;
         label
@@ -165,6 +165,41 @@ impl TacProgram {
                 self.parse_expression(expr, tac_instructions);
             }
             Statement::Null => {}
+            Statement::If {
+                exp,
+                then,
+                else_statement,
+            } => {
+                let cond_result = self.parse_expression(exp, tac_instructions);
+                let end_label = self.new_label();
+                // Handle if else
+                if let Some(else_stmnt) = else_statement {
+                    let else_label = self.new_label();
+
+                    tac_instructions.push(TacInstruction::JumpIfZero {
+                        condition: cond_result,
+                        target: else_label.clone(),
+                    });
+
+                    self.parse_statement(*then, tac_instructions);
+                    tac_instructions.push(TacInstruction::Jump {
+                        target: end_label.clone(),
+                    });
+                    tac_instructions.push(TacInstruction::Label(else_label));
+                    self.parse_statement(*else_stmnt, tac_instructions);
+                    tac_instructions.push(TacInstruction::Label(end_label));
+                } else {
+                    // handle just if
+
+                    tac_instructions.push(TacInstruction::JumpIfZero {
+                        condition: cond_result,
+                        target: end_label.clone(),
+                    });
+
+                    self.parse_statement(*then, tac_instructions);
+                    tac_instructions.push(TacInstruction::Label(end_label));
+                }
+            }
         }
     }
 
@@ -198,8 +233,8 @@ impl TacProgram {
                 // First handle short-circuting logical operators AND OR
                 match op {
                     BinaryOperator::And => {
-                        let false_label = self.new_label_();
-                        let end_label = self.new_label_();
+                        let false_label = self.new_label();
+                        let end_label = self.new_label();
                         let dst = self.new_temp_var();
 
                         let src_left = self.parse_expression(*left, tac_instructions);
@@ -232,8 +267,8 @@ impl TacProgram {
                         return dst;
                     }
                     BinaryOperator::Or => {
-                        let true_label = self.new_label_();
-                        let end_label = self.new_label_();
+                        let true_label = self.new_label();
+                        let end_label = self.new_label();
                         let dst = self.new_temp_var();
 
                         let src_left = self.parse_expression(*left, tac_instructions);
@@ -309,6 +344,43 @@ impl TacProgram {
                 } else {
                     panic!("Expected lvalue for assignment");
                 }
+            }
+            Expression::Conditional {
+                condition,
+                exp1,
+                exp2,
+            } => {
+                let e2 = self.new_label();
+                let end_label = self.new_label();
+                let result = self.new_temp_var();
+
+                // <condition> ? <e1> : <e2>
+                let src_cond = self.parse_expression(*condition, tac_instructions);
+                tac_instructions.push(TacInstruction::JumpIfZero {
+                    condition: src_cond,
+                    target: e2.clone(),
+                });
+
+                //main body
+                let src_exp1 = self.parse_expression(*exp1, tac_instructions);
+                tac_instructions.push(TacInstruction::Copy {
+                    src: src_exp1,
+                    dst: result.clone(),
+                });
+                tac_instructions.push(TacInstruction::Jump {
+                    target: end_label.clone(),
+                });
+
+                // else
+                tac_instructions.push(TacInstruction::Label(e2));
+                let src_exp2 = self.parse_expression(*exp2, tac_instructions);
+                tac_instructions.push(TacInstruction::Copy {
+                    src: src_exp2,
+                    dst: result.clone(),
+                });
+
+                tac_instructions.push(TacInstruction::Label(end_label));
+                result
             }
         }
     }

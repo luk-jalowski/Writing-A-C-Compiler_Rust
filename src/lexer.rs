@@ -8,6 +8,8 @@ pub enum TokenType {
     KeywordInt,
     KeywordReturn,
     KeywordVoid,
+    KeywordIf,
+    KeywordElse,
 
     // Single character tokens
     OpenParen,    // (
@@ -22,6 +24,8 @@ pub enum TokenType {
     ForwardSlash, // /
     Percent,      // %
     Assignment,   // =
+    QuestionMark, // ?
+    Colon,        // ;
 
     // Logical operators
     Not,            // !
@@ -217,6 +221,18 @@ impl<'a> Lexer<'a> {
                         self.chars.next();
                     }
                 }
+                '?' => {
+                    tokens.push(Token {
+                        token_type: TokenType::QuestionMark,
+                    });
+                    self.chars.next();
+                }
+                ':' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Colon,
+                    });
+                    self.chars.next();
+                }
 
                 '0'..='9' => {
                     let num = self.lex_integer();
@@ -232,6 +248,8 @@ impl<'a> Lexer<'a> {
                         "int" => TokenType::KeywordInt,
                         "void" => TokenType::KeywordVoid,
                         "return" => TokenType::KeywordReturn,
+                        "else" => TokenType::KeywordElse,
+                        "if" => TokenType::KeywordIf,
                         _ => TokenType::Identifier(word),
                     };
                     tokens.push(Token {
