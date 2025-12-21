@@ -10,7 +10,12 @@ pub enum AST {
 #[derive(Debug)]
 pub struct Function {
     pub name: String, // identifier
-    pub body: Vec<BlockItem>,
+    pub body: Block,
+}
+
+#[derive(Debug)]
+pub struct Block {
+    pub block_items: Vec<BlockItem>,
 }
 
 #[derive(Debug)]
@@ -28,6 +33,7 @@ pub enum Statement {
         then: Box<Statement>,
         else_statement: Option<Box<Statement>>,
     },
+    Compound(Block),
     Null,
 }
 
@@ -124,27 +130,26 @@ impl Parser {
         self.expect_token(TokenType::KeywordVoid);
         self.expect_token(TokenType::CloseParen);
 
+        let blocks = self.parse_block();
+
+        Function { name, body: blocks }
+    }
+
+    pub fn parse_block(&mut self) -> Block {
         self.expect_token(TokenType::OpenBrace);
 
-        let mut function_body: Vec<BlockItem> = Vec::new();
-
-        // let body = self.parse_statement();
-
-        // self.expect_token(TokenType::CloseBrace);
+        let mut block_items: Vec<BlockItem> = Vec::new();
 
         while TokenType::CloseBrace != self.peek_token().unwrap().token_type {
-            let block_item = self.parse_block_statement();
-            function_body.push(block_item);
+            let block_item = self.parse_block_item();
+            block_items.push(block_item);
         }
         self.consume_token();
 
-        Function {
-            name,
-            body: function_body,
-        }
+        Block { block_items }
     }
 
-    pub fn parse_block_statement(&mut self) -> BlockItem {
+    pub fn parse_block_item(&mut self) -> BlockItem {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordInt) => {
                 self.consume_token();
@@ -204,6 +209,11 @@ impl Parser {
                     then: Box::new(if_statement),
                     else_statement,
                 }
+            }
+            Some(TokenType::OpenBrace) => {
+                let block = self.parse_block();
+
+                Statement::Compound(block)
             }
             _ => {
                 let expr = self.parse_expression(0);

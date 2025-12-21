@@ -109,7 +109,7 @@ impl TacProgram {
     fn parse_function(&mut self, function: Function) -> TacFunction {
         let mut tac_instructions: Vec<TacInstruction> = Vec::new();
 
-        for block_item in function.body {
+        for block_item in function.body.block_items {
             self.parse_block_item(block_item, &mut tac_instructions);
         }
 
@@ -198,6 +198,11 @@ impl TacProgram {
 
                     self.parse_statement(*then, tac_instructions);
                     tac_instructions.push(TacInstruction::Label(end_label));
+                }
+            }
+            Statement::Compound(block) => {
+                for block_item in block.block_items {
+                    self.parse_block_item(block_item, tac_instructions);
                 }
             }
         }

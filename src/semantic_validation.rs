@@ -3,13 +3,13 @@ use std::collections::HashMap;
 use crate::parser::{AST, BlockItem, Declaration, Expression, Function, Statement};
 
 pub struct SemanticValidation {
-    variable_map: HashMap<String, String>,
+    scopes: Vec<HashMap<String, String>>,
     pub var_counter: usize,
 }
 impl SemanticValidation {
     pub fn new() -> Self {
         SemanticValidation {
-            variable_map: HashMap::new(),
+            scopes: vec![HashMap::new()],
             var_counter: 0,
         }
     }
@@ -28,7 +28,7 @@ impl SemanticValidation {
     }
 
     fn validate_function(&mut self, function: &mut Function) {
-        for block_item in &mut function.body {
+        for block_item in &mut function.body.block_items {
             self.validate_block_item(block_item);
         }
     }
@@ -45,17 +45,24 @@ impl SemanticValidation {
     }
 
     fn resolve_declaration(&mut self, declaration: &mut Declaration) {
-        if self.variable_map.contains_key(&declaration.name) {
+        if self
+            .scopes
+            .last()
+            .expect("Scope is empty")
+            .contains_key(&declaration.name)
+        {
             panic!(
                 "<resolve_declaration> Duplicate name found: {}",
                 declaration.name
             );
         }
+
         let temp_name = self.new_temp_var();
-        self.variable_map
+        self.scopes
+            .last_mut()
+            .expect("Scope is empty")
             .insert(declaration.name.clone(), temp_name.clone());
 
-        // Updates Declaration Node
         declaration.name = temp_name;
 
         if let Some(init) = &mut declaration.init {
@@ -66,14 +73,18 @@ impl SemanticValidation {
     fn resolve_expression(&mut self, expr: &mut Expression) {
         match expr {
             Expression::Var(name) => {
-                if let Some(new_name) = self.variable_map.get(name) {
-                    *name = new_name.clone();
-                } else {
-                    panic!(
-                        "<resolve_expression> Undeclared variable name found: {}",
-                        name
-                    );
-                }
+                // We need rev cause we need last occurence of given name (inner scope)
+                match self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+                    Some(new_name) => {
+                        *name = new_name.clone();
+                    }
+                    _ => {
+                        panic!(
+                            "<resolve_expression> Undeclared variable name found: {}",
+                            name
+                        );
+                    }
+                };
             }
             Expression::Assignment(left, right) => {
                 if !matches!(**left, Expression::Var(_)) {
@@ -115,6 +126,13 @@ impl SemanticValidation {
                 if let Some(else_stm) = else_statement {
                     self.resolve_statement(else_stm);
                 }
+            }
+            Statement::Compound(block) => {
+                self.scopes.push(HashMap::new());
+                for block_item in &mut block.block_items {
+                    self.validate_block_item(block_item);
+                }
+                self.scopes.pop();
             }
         }
     }
