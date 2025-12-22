@@ -10,6 +10,11 @@ pub enum TokenType {
     KeywordVoid,
     KeywordIf,
     KeywordElse,
+    KeywordDo,
+    KeywordWhile,
+    KeywordFor,
+    KeywordBreak,
+    KeywordContinue,
 
     // Single character tokens
     OpenParen,    // (
@@ -250,6 +255,11 @@ impl<'a> Lexer<'a> {
                         "return" => TokenType::KeywordReturn,
                         "else" => TokenType::KeywordElse,
                         "if" => TokenType::KeywordIf,
+                        "do" => TokenType::KeywordDo,
+                        "while" => TokenType::KeywordWhile,
+                        "for" => TokenType::KeywordFor,
+                        "break" => TokenType::KeywordBreak,
+                        "continue" => TokenType::KeywordContinue,
                         _ => TokenType::Identifier(word),
                     };
                     tokens.push(Token {

@@ -34,7 +34,36 @@ pub enum Statement {
         else_statement: Option<Box<Statement>>,
     },
     Compound(Block),
+    Break {
+        label: String,
+    },
+    Continue {
+        label: String,
+    },
+    While {
+        condition: Expression,
+        body: Box<Statement>,
+        label: String,
+    },
+    DoWhile {
+        body: Box<Statement>,
+        condition: Expression,
+        label: String,
+    },
+    For {
+        init: ForInit,
+        condition: Option<Box<Expression>>,
+        post: Option<Box<Expression>>,
+        body: Box<Statement>,
+        label: String,
+    },
     Null,
+}
+
+#[derive(Debug)]
+pub enum ForInit {
+    InitDeclaration(Declaration),
+    InitExpression(Option<Box<Expression>>),
 }
 
 #[derive(Debug)]
@@ -151,29 +180,30 @@ impl Parser {
 
     pub fn parse_block_item(&mut self) -> BlockItem {
         match self.peek_token().map(|t| t.token_type) {
-            Some(TokenType::KeywordInt) => {
-                self.consume_token();
-                let name = match self.consume_token() {
-                    Some(token) => match token.token_type {
-                        TokenType::Identifier(name) => name,
-                        _ => panic!("Expected identifier after int keyword!"),
-                    },
-                    None => panic!("Unexpected end of tokens!"),
-                };
-
-                let init =
-                    if let Some(TokenType::Assignment) = self.peek_token().map(|t| t.token_type) {
-                        self.consume_token();
-                        Some(self.parse_expression(0))
-                    } else {
-                        None
-                    };
-
-                self.expect_token(TokenType::Semicolon);
-                BlockItem::Declaration(Declaration { name, init })
-            }
+            Some(TokenType::KeywordInt) => BlockItem::Declaration(self.parse_declaration()),
             _ => BlockItem::Statement(self.parse_statement()),
         }
+    }
+
+    pub fn parse_declaration(&mut self) -> Declaration {
+        self.expect_token(TokenType::KeywordInt);
+        let name = match self.consume_token() {
+            Some(token) => match token.token_type {
+                TokenType::Identifier(name) => name,
+                _ => panic!("Expected identifier after int keyword!"),
+            },
+            None => panic!("Unexpected end of tokens!"),
+        };
+
+        let init = if let Some(TokenType::Assignment) = self.peek_token().map(|t| t.token_type) {
+            self.consume_token();
+            Some(self.parse_expression(0))
+        } else {
+            None
+        };
+
+        self.expect_token(TokenType::Semicolon);
+        Declaration { name, init }
     }
 
     pub fn parse_statement(&mut self) -> Statement {
@@ -215,11 +245,102 @@ impl Parser {
 
                 Statement::Compound(block)
             }
+            Some(TokenType::KeywordBreak) => {
+                self.consume_token();
+                self.expect_token(TokenType::Semicolon);
+                Statement::Break {
+                    label: "dummy_break".to_string(), // to be replaced during semantic validation
+                }
+            }
+            Some(TokenType::KeywordContinue) => {
+                self.consume_token();
+                self.expect_token(TokenType::Semicolon);
+                Statement::Continue {
+                    label: "dummy_continue".to_string(), // to be replaced during semantic validation
+                }
+            }
+            Some(TokenType::KeywordWhile) => {
+                self.consume_token();
+                self.expect_token(TokenType::OpenParen);
+                let expr = self.parse_expression(0);
+                self.expect_token(TokenType::CloseParen);
+                let statement = self.parse_statement();
+                Statement::While {
+                    condition: expr,
+                    body: Box::new(statement),
+                    label: "dummy_while".to_string(), // to be replaced during semantic validation
+                }
+            }
+            Some(TokenType::KeywordDo) => {
+                self.consume_token();
+                let statement = self.parse_statement();
+                self.expect_token(TokenType::KeywordWhile);
+                self.expect_token(TokenType::OpenParen);
+                let expr = self.parse_expression(0);
+                self.expect_token(TokenType::CloseParen);
+                self.expect_token(TokenType::Semicolon);
+
+                Statement::DoWhile {
+                    body: Box::new(statement),
+                    condition: expr,
+                    label: "dummy_dowhile".to_string(), // to be replaced during semantic validation
+                }
+            }
+            Some(TokenType::KeywordFor) => {
+                self.consume_token();
+                self.expect_token(TokenType::OpenParen);
+
+                // For loop is for (for_init; condition; post)
+                // Condition and post are optional, ; are not
+                let for_init = self.parse_for_init();
+
+                let condition =
+                    if self.peek_token().map(|t| t.token_type) != Some(TokenType::Semicolon) {
+                        Some(Box::new(self.parse_expression(0)))
+                    } else {
+                        None
+                    };
+                self.expect_token(TokenType::Semicolon);
+
+                let post = if self.peek_token().map(|t| t.token_type) != Some(TokenType::CloseParen)
+                {
+                    Some(Box::new(self.parse_expression(0)))
+                } else {
+                    None
+                };
+
+                self.expect_token(TokenType::CloseParen);
+
+                let body = self.parse_statement();
+
+                Statement::For {
+                    init: for_init,
+                    condition,
+                    post,
+                    body: Box::new(body),
+                    label: "dummy_for".to_string(),
+                }
+            }
             _ => {
                 let expr = self.parse_expression(0);
                 self.expect_token(TokenType::Semicolon);
                 Statement::Expression(expr)
             }
+        }
+    }
+
+    pub fn parse_for_init(&mut self) -> ForInit {
+        if let Some(TokenType::KeywordInt) = self.peek_token().map(|t| t.token_type) {
+            ForInit::InitDeclaration(self.parse_declaration())
+        } else {
+            let expr = if self.peek_token().map(|t| t.token_type) != Some(TokenType::Semicolon) {
+                Some(Box::new(self.parse_expression(0)))
+            } else {
+                None
+            };
+            self.expect_token(TokenType::Semicolon);
+
+            ForInit::InitExpression(expr)
         }
     }
 

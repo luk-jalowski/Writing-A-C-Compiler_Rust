@@ -1,16 +1,20 @@
 use std::collections::HashMap;
 
-use crate::parser::{AST, BlockItem, Declaration, Expression, Function, Statement};
+use crate::parser::{AST, BlockItem, Declaration, Expression, ForInit, Function, Statement};
 
 pub struct SemanticValidation {
     scopes: Vec<HashMap<String, String>>,
+    loop_stack: Vec<(String, String)>, // (break_label, continue_label)
     pub var_counter: usize,
+    pub label_counter: usize,
 }
 impl SemanticValidation {
     pub fn new() -> Self {
         SemanticValidation {
             scopes: vec![HashMap::new()],
+            loop_stack: Vec::new(),
             var_counter: 0,
+            label_counter: 0,
         }
     }
 
@@ -19,6 +23,12 @@ impl SemanticValidation {
         let tmp = format!("tmp.{}", self.var_counter);
         self.var_counter += 1;
         tmp.to_string()
+    }
+
+    fn new_loop_label(&mut self) -> String {
+        let label = format!("Loop.{}", self.label_counter);
+        self.label_counter += 1;
+        label
     }
 
     pub fn validate(&mut self, ast: &mut AST) {
@@ -133,6 +143,101 @@ impl SemanticValidation {
                     self.validate_block_item(block_item);
                 }
                 self.scopes.pop();
+            }
+            Statement::Break { label } => {
+                let (break_target, _) = self
+                    .loop_stack
+                    .last()
+                    .expect("Break statement outside of loop");
+                *label = break_target.clone();
+            }
+            Statement::Continue { label } => {
+                let (_, continue_target) = self
+                    .loop_stack
+                    .last()
+                    .expect("Continue statement outside of loop");
+                *label = continue_target.clone();
+            }
+            Statement::DoWhile {
+                body,
+                condition,
+                label,
+            } => {
+                let loop_name = self.new_loop_label();
+                *label = loop_name.clone(); // update dummy label
+                let break_target = format!("break_{}", loop_name);
+                let continue_target = format!("continue_{}", loop_name);
+
+                self.loop_stack
+                    .push((break_target.clone(), continue_target.clone()));
+
+                self.scopes.push(HashMap::new());
+                self.resolve_statement(body);
+                self.resolve_expression(condition);
+                self.scopes.pop();
+
+                self.loop_stack.pop();
+            }
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                label,
+            } => {
+                let loop_name = self.new_loop_label();
+                *label = loop_name.clone(); // update dummy label
+                let break_target = format!("break_{}", loop_name);
+                let continue_target = format!("continue_{}", loop_name);
+
+                self.loop_stack
+                    .push((break_target.clone(), continue_target.clone()));
+
+                self.scopes.push(HashMap::new());
+                self.resolve_for_init(init);
+                if let Some(cond_expr) = condition {
+                    self.resolve_expression(cond_expr);
+                }
+                if let Some(post_expr) = post {
+                    self.resolve_expression(post_expr);
+                }
+                self.resolve_statement(body);
+                self.scopes.pop();
+
+                self.loop_stack.pop();
+            }
+            Statement::While {
+                condition,
+                body,
+                label,
+            } => {
+                let loop_name = self.new_loop_label();
+                *label = loop_name.clone(); // update dummy label
+                let break_target = format!("break_{}", loop_name);
+                let continue_target = format!("continue_{}", loop_name);
+
+                self.loop_stack
+                    .push((break_target.clone(), continue_target.clone()));
+
+                self.scopes.push(HashMap::new());
+                self.resolve_expression(condition);
+                self.resolve_statement(body);
+                self.scopes.pop();
+
+                self.loop_stack.pop();
+            }
+        }
+    }
+
+    pub fn resolve_for_init(&mut self, for_init: &mut ForInit) {
+        match for_init {
+            ForInit::InitDeclaration(decl) => {
+                self.resolve_declaration(decl);
+            }
+            ForInit::InitExpression(expr) => {
+                if let Some(init_expr) = expr {
+                    self.resolve_expression(init_expr);
+                }
             }
         }
     }

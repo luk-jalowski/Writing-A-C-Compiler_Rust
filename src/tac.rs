@@ -1,7 +1,8 @@
 use core::panic;
 
 use crate::parser::{
-    AST, BinaryOperator, BlockItem, Declaration, Expression, Function, Statement, UnaryOperator,
+    AST, BinaryOperator, BlockItem, Declaration, Expression, ForInit, Function, Statement,
+    UnaryOperator,
 };
 
 #[derive(Debug)]
@@ -205,6 +206,79 @@ impl TacProgram {
                     self.parse_block_item(block_item, tac_instructions);
                 }
             }
+            Statement::Break { label } => {
+                tac_instructions.push(TacInstruction::Jump { target: label });
+            }
+            Statement::Continue { label } => {
+                tac_instructions.push(TacInstruction::Jump { target: label });
+            }
+            Statement::DoWhile {
+                body,
+                condition,
+                label,
+            } => {
+                let break_target = format!("break_{}", label);
+                let continue_target = format!("continue_{}", label);
+
+                tac_instructions.push(TacInstruction::Label(label.clone()));
+                self.parse_statement(*body, tac_instructions);
+                tac_instructions.push(TacInstruction::Label(continue_target));
+                let result = self.parse_expression(condition, tac_instructions);
+                tac_instructions.push(TacInstruction::JumpIfNotZero {
+                    condition: result,
+                    target: label,
+                });
+                tac_instructions.push(TacInstruction::Label(break_target));
+            }
+            Statement::For {
+                init,
+                condition,
+                post,
+                body,
+                label,
+            } => {
+                let break_target = format!("break_{}", label);
+                let continue_target = format!("continue_{}", label);
+
+                self.parse_for_init(init, tac_instructions);
+                tac_instructions.push(TacInstruction::Label(label.clone()));
+
+                if let Some(for_cond) = condition {
+                    let cond_result = self.parse_expression(*for_cond, tac_instructions);
+                    tac_instructions.push(TacInstruction::JumpIfZero {
+                        condition: cond_result,
+                        target: break_target.clone(),
+                    });
+                }
+
+                self.parse_statement(*body, tac_instructions);
+                tac_instructions.push(TacInstruction::Label(continue_target));
+                if let Some(for_post) = post {
+                    let cond_result = self.parse_expression(*for_post, tac_instructions);
+                }
+                tac_instructions.push(TacInstruction::Jump { target: label });
+                tac_instructions.push(TacInstruction::Label(break_target));
+            }
+            Statement::While {
+                condition,
+                body,
+                label,
+            } => {
+                let break_target = format!("break_{}", label);
+                let continue_target = format!("continue_{}", label);
+
+                tac_instructions.push(TacInstruction::Label(continue_target.clone()));
+                let result = self.parse_expression(condition, tac_instructions);
+                tac_instructions.push(TacInstruction::JumpIfZero {
+                    condition: result,
+                    target: break_target.clone(),
+                });
+                self.parse_statement(*body, tac_instructions);
+                tac_instructions.push(TacInstruction::Jump {
+                    target: continue_target,
+                });
+                tac_instructions.push(TacInstruction::Label(break_target));
+            }
         }
     }
 
@@ -386,6 +460,23 @@ impl TacProgram {
 
                 tac_instructions.push(TacInstruction::Label(end_label));
                 result
+            }
+        }
+    }
+
+    pub fn parse_for_init(
+        &mut self,
+        for_init: ForInit,
+        tac_instructions: &mut Vec<TacInstruction>,
+    ) {
+        match for_init {
+            ForInit::InitDeclaration(decl) => {
+                self.parse_declaration(decl, tac_instructions);
+            }
+            ForInit::InitExpression(expr) => {
+                if let Some(e) = expr {
+                    self.parse_expression(*e, tac_instructions);
+                }
             }
         }
     }
