@@ -1,23 +1,25 @@
 use clap::Parser as clapParser;
-use std::{fs, os::unix::process::CommandExt, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use std::fs::File;
-use std::io::{Write};
+use std::io::Write;
 
+pub mod ast;
 pub mod code_emission;
 pub mod code_gen;
 pub mod lexer;
 pub mod parser;
 pub mod semantic_validation;
 pub mod tac;
+pub mod type_validation;
 
 use crate::code_emission::CodeEmission;
-// use crate::code_emission::CodeEmission;
 use crate::code_gen::AsmProgram;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::semantic_validation::SemanticValidation;
 use crate::tac::TacProgram;
+use crate::type_validation::TypeValidation;
 
 /// A Rust-based C compiler
 #[derive(clapParser, Debug)]
@@ -39,6 +41,9 @@ struct Args {
 
     #[arg(long)]
     codegen: bool,
+
+    #[arg{long, short}]
+    compile_only: bool,
 }
 
 fn main() {
@@ -68,6 +73,10 @@ fn main() {
     semantic_validation.validate(&mut ast);
     println!("Parser after validation \n{:?}", ast);
 
+    let mut type_validation = TypeValidation::new();
+    type_validation.validate(&mut ast);
+    println!("Parser after type checking \n{:?}", ast);
+
     if args.validate {
         return;
     }
@@ -91,17 +100,30 @@ fn main() {
     let output_code = code_emit.generate_code(&asm_ast);
 
     let asm_output_path = input_path.with_extension("s");
-    let bin_output_path = input_path.with_extension("");
+    let bin_output_path = if args.compile_only {
+        input_path.with_extension("o")
+    } else {
+        input_path.with_extension("")
+    };
 
     let mut file = File::create(&asm_output_path).expect("Unable to create file");
     for line in &output_code {
         let _ = write!(file, "{}", line);
     }
-    let _ = Command::new("gcc")
-        .arg(asm_output_path.as_os_str())
-        .arg("-o")
-        .arg(bin_output_path.as_os_str())
-        .exec();
 
-    //cleanup ?
+    let mut cmd = Command::new("gcc");
+
+    cmd.arg(&asm_output_path).arg("-o").arg(&bin_output_path);
+
+    if args.compile_only {
+        cmd.arg("-c");
+    }
+
+    let status = cmd.status().expect("Failed to run gcc");
+
+    if !status.success() {
+        println!("Failed to run the program cleanly {:?}", status);
+    }
+
+    // let _ = fs::remove_file(&asm_output_path);
 }

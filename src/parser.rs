@@ -1,117 +1,7 @@
 use core::panic;
 
+use crate::ast::*;
 use crate::lexer::{Token, TokenType};
-
-#[derive(Debug)]
-pub enum AST {
-    Program(Function),
-}
-
-#[derive(Debug)]
-pub struct Function {
-    pub name: String, // identifier
-    pub body: Block,
-}
-
-#[derive(Debug)]
-pub struct Block {
-    pub block_items: Vec<BlockItem>,
-}
-
-#[derive(Debug)]
-pub enum BlockItem {
-    Statement(Statement),
-    Declaration(Declaration),
-}
-
-#[derive(Debug)]
-pub enum Statement {
-    Return(Expression),
-    Expression(Expression),
-    If {
-        exp: Expression,
-        then: Box<Statement>,
-        else_statement: Option<Box<Statement>>,
-    },
-    Compound(Block),
-    Break {
-        label: String,
-    },
-    Continue {
-        label: String,
-    },
-    While {
-        condition: Expression,
-        body: Box<Statement>,
-        label: String,
-    },
-    DoWhile {
-        body: Box<Statement>,
-        condition: Expression,
-        label: String,
-    },
-    For {
-        init: ForInit,
-        condition: Option<Box<Expression>>,
-        post: Option<Box<Expression>>,
-        body: Box<Statement>,
-        label: String,
-    },
-    Null,
-}
-
-#[derive(Debug)]
-pub enum ForInit {
-    InitDeclaration(Declaration),
-    InitExpression(Option<Box<Expression>>),
-}
-
-#[derive(Debug)]
-pub struct Declaration {
-    pub name: String,
-    pub init: Option<Expression>,
-}
-
-#[derive(Debug)]
-pub enum Expression {
-    Constant(i32),
-    Var(String),
-    UnaryExpr(UnaryOperator, Box<Expression>),
-    BinaryExp(Box<Expression>, BinaryOperator, Box<Expression>),
-    Assignment(Box<Expression>, Box<Expression>),
-    Conditional {
-        condition: Box<Expression>,
-        exp1: Box<Expression>,
-        exp2: Box<Expression>,
-    },
-}
-
-#[derive(Debug)]
-pub enum UnaryOperator {
-    Complement,
-    Negate,
-    Not,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum BinaryOperator {
-    Assignment,
-    Addition,
-    Subtraction,
-    Multiplication,
-    Division,
-    Modulo,
-    And,
-    Or,
-    EqualTo,
-    NotEqualTo,
-    LessThan,
-    LessOrEqual,
-    GreaterThan,
-    GreaterOrEqual,
-    QuestionMark,
-    Colon,
-}
 
 pub struct Parser {
     pub tokens: Vec<Token>,
@@ -129,39 +19,14 @@ impl Parser {
         self.parse_program()
     }
     pub fn parse_program(&mut self) -> Result<AST, String> {
-        let func = self.parse_function();
-
-        if (self.current_positon != self.tokens.len() - 1)
-            || (self.tokens[self.current_positon].token_type != TokenType::EOF)
-        {
-            return Err(format!("Syntax Error: Unexpected token at the end"));
+        let mut declarations = Vec::new();
+        while let Some(token) = self.peek_token() {
+            if token.token_type == TokenType::EOF {
+                break;
+            }
+            declarations.push(self.parse_declaration());
         }
-        println!(
-            "Current token is {}, total: {}",
-            self.current_positon,
-            self.tokens.len()
-        );
-        Ok(AST::Program(func))
-    }
-
-    pub fn parse_function(&mut self) -> Function {
-        self.expect_token(TokenType::KeywordInt);
-
-        let name = match self.consume_token() {
-            Some(token) => match token.token_type {
-                TokenType::Identifier(name) => name,
-                _ => panic!("Expected function name"),
-            },
-            None => panic!("Unexpected EOF while parsing function name"),
-        };
-
-        self.expect_token(TokenType::OpenParen);
-        self.expect_token(TokenType::KeywordVoid);
-        self.expect_token(TokenType::CloseParen);
-
-        let blocks = self.parse_block();
-
-        Function { name, body: blocks }
+        Ok(AST::Program(declarations))
     }
 
     pub fn parse_block(&mut self) -> Block {
@@ -185,6 +50,7 @@ impl Parser {
         }
     }
 
+    // Both function and variable declaration start with "int" <identifier> (for now)
     pub fn parse_declaration(&mut self) -> Declaration {
         self.expect_token(TokenType::KeywordInt);
         let name = match self.consume_token() {
@@ -195,15 +61,93 @@ impl Parser {
             None => panic!("Unexpected end of tokens!"),
         };
 
-        let init = if let Some(TokenType::Assignment) = self.peek_token().map(|t| t.token_type) {
-            self.consume_token();
-            Some(self.parse_expression(0))
-        } else {
-            None
-        };
+        match self.peek_token().map(|t| t.token_type) {
+            // Since we have = this is variable declaration
+            Some(TokenType::Assignment) => {
+                self.consume_token();
+                let expr = self.parse_expression(0);
+                self.expect_token(TokenType::Semicolon);
 
-        self.expect_token(TokenType::Semicolon);
-        Declaration { name, init }
+                Declaration::VarDecl(VarDecl {
+                    name: name,
+                    init: Some(expr),
+                })
+            }
+            Some(TokenType::Semicolon) => {
+                self.consume_token();
+                Declaration::VarDecl(VarDecl {
+                    name: name,
+                    init: None,
+                })
+            }
+            Some(TokenType::OpenParen) => {
+                self.consume_token();
+                let params = self.parse_param_list();
+                self.expect_token(TokenType::CloseParen);
+
+                if let Some(TokenType::OpenBrace) = self.peek_token().map(|t| t.token_type) {
+                    let body = self.parse_block();
+                    Declaration::FunDecl(FunDecl {
+                        name,
+                        params,
+                        body: Some(body),
+                    })
+                } else {
+                    self.expect_token(TokenType::Semicolon);
+                    Declaration::FunDecl(FunDecl {
+                        name,
+                        params,
+                        body: None,
+                    })
+                }
+            }
+            _ => panic!(
+                "parse_declaration Unexpected token in declaration {:?}",
+                self.peek_token()
+            ),
+        }
+    }
+
+    pub fn parse_param_list(&mut self) -> Vec<String> {
+        match self.peek_token().map(|t| t.token_type) {
+            Some(TokenType::KeywordVoid) => {
+                self.consume_token();
+
+                Vec::new()
+            }
+            Some(TokenType::KeywordInt) => {
+                self.consume_token();
+                let mut params = Vec::new();
+
+                if let Some(TokenType::Identifier(name)) =
+                    self.consume_token().map(|t| t.token_type)
+                {
+                    params.push(name);
+                } else {
+                    panic!("parse_param_list Expected identifier in param list");
+                }
+
+                while let Some(TokenType::Comma) = self.peek_token().map(|t| t.token_type) {
+                    self.consume_token();
+                    self.expect_token(TokenType::KeywordInt);
+                    if let Some(TokenType::Identifier(name)) =
+                        self.consume_token().map(|t| t.token_type)
+                    {
+                        params.push(name);
+                    } else {
+                        panic!("parse_param_list Expected identifier in param list");
+                    }
+                }
+
+                params
+            }
+            _ => {
+                panic!(
+                    " parse_param_list Unexpected keyword found {:?}",
+                    self.peek_token()
+                )
+            }
+        }
     }
 
     pub fn parse_statement(&mut self) -> Statement {
@@ -331,7 +275,12 @@ impl Parser {
 
     pub fn parse_for_init(&mut self) -> ForInit {
         if let Some(TokenType::KeywordInt) = self.peek_token().map(|t| t.token_type) {
-            ForInit::InitDeclaration(self.parse_declaration())
+            match self.parse_declaration() {
+                Declaration::VarDecl(var_decl) => ForInit::InitDeclaration(var_decl),
+                _ => {
+                    panic!("parse_for_init Expected variable declaration!");
+                }
+            }
         } else {
             let expr = if self.peek_token().map(|t| t.token_type) != Some(TokenType::Semicolon) {
                 Some(Box::new(self.parse_expression(0)))
@@ -362,12 +311,39 @@ impl Parser {
                     self.expect_token(TokenType::CloseParen);
                     inner_expr
                 }
-                TokenType::Identifier(name) => Expression::Var(name),
+                TokenType::Identifier(name) => {
+                    if let Some(TokenType::OpenParen) = self.peek_token().map(|t| t.token_type) {
+                        self.consume_token();
+
+                        let args = self.parse_argument_list();
+                        self.expect_token(TokenType::CloseParen);
+                        Expression::FunctionCall { name, args }
+                    } else {
+                        Expression::Var(name)
+                    }
+                }
 
                 _ => panic!("Expected factor got {:?}", token),
             },
             None => panic!("Unexpected EOF while parsing factor"),
         }
+    }
+
+    pub fn parse_argument_list(&mut self) -> Vec<Expression> {
+        let mut args = Vec::new();
+
+        if let Some(TokenType::CloseParen) = self.peek_token().map(|t| t.token_type) {
+            return args;
+        }
+
+        args.push(self.parse_expression(0));
+
+        while let Some(TokenType::Comma) = self.peek_token().map(|t| t.token_type) {
+            self.consume_token();
+            args.push(self.parse_expression(0));
+        }
+
+        args
     }
 
     pub fn parse_expression(&mut self, min_prec: u32) -> Expression {

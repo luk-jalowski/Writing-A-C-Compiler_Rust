@@ -16,7 +16,6 @@ pub enum TokenType {
     KeywordBreak,
     KeywordContinue,
 
-    // Single character tokens
     OpenParen,    // (
     CloseParen,   // )
     OpenBrace,    // {
@@ -31,6 +30,7 @@ pub enum TokenType {
     Assignment,   // =
     QuestionMark, // ?
     Colon,        // ;
+    Comma,
 
     // Logical operators
     Not,            // !
@@ -235,6 +235,12 @@ impl<'a> Lexer<'a> {
                 ':' => {
                     tokens.push(Token {
                         token_type: TokenType::Colon,
+                    });
+                    self.chars.next();
+                }
+                ',' => {
+                    tokens.push(Token {
+                        token_type: TokenType::Comma,
                     });
                     self.chars.next();
                 }

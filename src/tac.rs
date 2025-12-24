@@ -1,17 +1,18 @@
 use core::panic;
 
-use crate::parser::{
-    AST, BinaryOperator, BlockItem, Declaration, Expression, ForInit, Function, Statement,
-    UnaryOperator,
+use crate::ast::{
+    AST, BinaryOperator, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement,
+    UnaryOperator, VarDecl,
 };
 
 #[derive(Debug)]
 pub enum TacAst {
-    TacProgram(TacFunction),
+    TacProgram(Vec<TacFunction>),
 }
 #[derive(Debug)]
 pub struct TacFunction {
-    pub name: String, // identifier
+    pub name: String,
+    pub params: Vec<String>,
     pub body: Vec<TacInstruction>,
 }
 
@@ -45,6 +46,12 @@ pub enum TacInstruction {
         target: String,
     },
     Label(String),
+
+    FuncCall {
+        name: String,
+        args: Vec<TacOperand>,
+        dst: TacOperand,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -103,16 +110,28 @@ impl TacProgram {
 
     pub fn generate_tac(&mut self, ast: AST) -> TacAst {
         match ast {
-            AST::Program(function) => TacAst::TacProgram(self.parse_function(function)),
+            AST::Program(declarations) => {
+                let mut functions = Vec::new();
+                for decl in declarations {
+                    if let Declaration::FunDecl(func) = decl {
+                        if func.body.is_some() {
+                            functions.push(self.parse_function(func));
+                        }
+                    }
+                }
+                TacAst::TacProgram(functions)
+            }
         }
     }
 
-    fn parse_function(&mut self, function: Function) -> TacFunction {
+    fn parse_function(&mut self, function: FunDecl) -> TacFunction {
         let mut tac_instructions: Vec<TacInstruction> = Vec::new();
 
-        for block_item in function.body.block_items {
-            self.parse_block_item(block_item, &mut tac_instructions);
-        }
+        if let Some(body) = function.body {
+            for block_item in body.block_items {
+                self.parse_block_item(block_item, &mut tac_instructions);
+            }
+        };
 
         // Add 0 if there is no implicit return
         if !matches!(tac_instructions.last(), Some(TacInstruction::Ret(_))) {
@@ -121,6 +140,7 @@ impl TacProgram {
 
         TacFunction {
             name: function.name,
+            params: function.params,
             body: tac_instructions,
         }
     }
@@ -143,11 +163,26 @@ impl TacProgram {
         declaration: Declaration,
         tac_instructions: &mut Vec<TacInstruction>,
     ) {
-        if let Some(expr) = declaration.init {
+        match declaration {
+            Declaration::VarDecl(var_decl) => {
+                self.parse_var_declaration(var_decl, tac_instructions);
+            }
+            Declaration::FunDecl(func_decl) => {
+                self.parse_function(func_decl);
+            }
+        }
+    }
+
+    fn parse_var_declaration(
+        &mut self,
+        var_decl: VarDecl,
+        tac_instructions: &mut Vec<TacInstruction>,
+    ) {
+        if let Some(expr) = var_decl.init {
             let src = self.parse_expression(expr, tac_instructions);
             tac_instructions.push(TacInstruction::Copy {
                 src,
-                dst: TacOperand::Var(declaration.name),
+                dst: TacOperand::Var(var_decl.name),
             });
         }
     }
@@ -254,7 +289,7 @@ impl TacProgram {
                 self.parse_statement(*body, tac_instructions);
                 tac_instructions.push(TacInstruction::Label(continue_target));
                 if let Some(for_post) = post {
-                    let cond_result = self.parse_expression(*for_post, tac_instructions);
+                    self.parse_expression(*for_post, tac_instructions);
                 }
                 tac_instructions.push(TacInstruction::Jump { target: label });
                 tac_instructions.push(TacInstruction::Label(break_target));
@@ -296,9 +331,6 @@ impl TacProgram {
                     UnaryOperator::Complement => TacUnaryOp::Complement,
                     UnaryOperator::Negate => TacUnaryOp::Negate,
                     UnaryOperator::Not => TacUnaryOp::Not,
-                    _ => {
-                        panic!("Unsupported operator in tac {:?}", op);
-                    }
                 };
 
                 tac_instructions.push(TacInstruction::Unary {
@@ -461,6 +493,19 @@ impl TacProgram {
                 tac_instructions.push(TacInstruction::Label(end_label));
                 result
             }
+            Expression::FunctionCall { name, args } => {
+                let mut call_args = Vec::new();
+                let result = self.new_temp_var();
+                for arg in args {
+                    call_args.push(self.parse_expression(arg, tac_instructions));
+                }
+                tac_instructions.push(TacInstruction::FuncCall {
+                    name,
+                    args: call_args,
+                    dst: result.clone(),
+                });
+                result
+            }
         }
     }
 
@@ -471,7 +516,7 @@ impl TacProgram {
     ) {
         match for_init {
             ForInit::InitDeclaration(decl) => {
-                self.parse_declaration(decl, tac_instructions);
+                self.parse_var_declaration(decl, tac_instructions);
             }
             ForInit::InitExpression(expr) => {
                 if let Some(e) = expr {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::parser::{AST, BlockItem, Declaration, Expression, ForInit, Function, Statement};
+use crate::ast::{AST, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, VarDecl};
 
 pub struct SemanticValidation {
     scopes: Vec<HashMap<String, String>>,
@@ -33,17 +33,70 @@ impl SemanticValidation {
 
     pub fn validate(&mut self, ast: &mut AST) {
         match ast {
-            AST::Program(function) => self.validate_function(function),
+            AST::Program(declarations) => {
+                for decl in declarations {
+                    self.resolve_declaration(decl);
+                }
+            }
         }
     }
 
-    fn validate_function(&mut self, function: &mut Function) {
-        for block_item in &mut function.body.block_items {
-            self.validate_block_item(block_item);
+    fn resolve_function_declaration(&mut self, function: &mut FunDecl) {
+        if function.body.is_some() && self.scopes.len() > 1 {
+            panic!("Nested function definitions are not permitted");
         }
+
+        if let Some(name) = self
+            .scopes
+            .last()
+            .expect("Scope is empty")
+            .get(&function.name)
+        {
+            if *name != function.name {
+                panic!(
+                    "<resolve_function_declaration> Duplicate function name found: {}",
+                    function.name
+                );
+            }
+        }
+        self.scopes
+            .last_mut()
+            .expect("Scope is empty")
+            .insert(function.name.clone(), function.name.clone());
+        self.scopes.push(HashMap::new());
+
+        for param in &mut function.params {
+            if self
+                .scopes
+                .last()
+                .expect("Scope is empty")
+                .contains_key(param)
+            {
+                panic!(
+                    "<resolve_function_declaration> Duplicate parameter name found: {}",
+                    param
+                );
+            }
+
+            let temp_name = self.new_temp_var();
+            self.scopes
+                .last_mut()
+                .expect("Scope is empty")
+                .insert(param.clone(), temp_name.clone());
+
+            *param = temp_name;
+        }
+
+        if let Some(body) = &mut function.body {
+            for block_item in &mut body.block_items {
+                self.resolve_block_item(block_item);
+            }
+        };
+
+        self.scopes.pop();
     }
 
-    fn validate_block_item(&mut self, block_item: &mut BlockItem) {
+    fn resolve_block_item(&mut self, block_item: &mut BlockItem) {
         match block_item {
             BlockItem::Declaration(declaration) => {
                 self.resolve_declaration(declaration);
@@ -55,15 +108,22 @@ impl SemanticValidation {
     }
 
     fn resolve_declaration(&mut self, declaration: &mut Declaration) {
+        match declaration {
+            Declaration::VarDecl(var_decl) => self.resolve_var_declaration(var_decl),
+            Declaration::FunDecl(func_decl) => self.resolve_function_declaration(func_decl),
+        }
+    }
+
+    fn resolve_var_declaration(&mut self, var_decl: &mut VarDecl) {
         if self
             .scopes
             .last()
             .expect("Scope is empty")
-            .contains_key(&declaration.name)
+            .contains_key(&var_decl.name)
         {
             panic!(
                 "<resolve_declaration> Duplicate name found: {}",
-                declaration.name
+                var_decl.name
             );
         }
 
@@ -71,11 +131,11 @@ impl SemanticValidation {
         self.scopes
             .last_mut()
             .expect("Scope is empty")
-            .insert(declaration.name.clone(), temp_name.clone());
+            .insert(var_decl.name.clone(), temp_name.clone());
 
-        declaration.name = temp_name;
+        var_decl.name = temp_name;
 
-        if let Some(init) = &mut declaration.init {
+        if let Some(init) = &mut var_decl.init {
             self.resolve_expression(init);
         }
     }
@@ -118,6 +178,14 @@ impl SemanticValidation {
                 self.resolve_expression(exp1);
                 self.resolve_expression(exp2);
             }
+            Expression::FunctionCall { name, args } => {
+                if let Some(new_name) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+                    *name = new_name.clone();
+                }
+                for arg in args {
+                    self.resolve_expression(arg);
+                }
+            }
         }
     }
 
@@ -140,7 +208,7 @@ impl SemanticValidation {
             Statement::Compound(block) => {
                 self.scopes.push(HashMap::new());
                 for block_item in &mut block.block_items {
-                    self.validate_block_item(block_item);
+                    self.resolve_block_item(block_item);
                 }
                 self.scopes.pop();
             }
@@ -231,8 +299,8 @@ impl SemanticValidation {
 
     pub fn resolve_for_init(&mut self, for_init: &mut ForInit) {
         match for_init {
-            ForInit::InitDeclaration(decl) => {
-                self.resolve_declaration(decl);
+            ForInit::InitDeclaration(var_decl) => {
+                self.resolve_var_declaration(var_decl);
             }
             ForInit::InitExpression(expr) => {
                 if let Some(init_expr) = expr {

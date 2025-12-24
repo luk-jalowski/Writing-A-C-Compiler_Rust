@@ -4,7 +4,7 @@ use crate::tac::{TacAst, TacBinaryOp, TacFunction, TacInstruction, TacOperand, T
 
 #[derive(Debug)]
 pub enum AsmAst {
-    AsmProgram(AsmFunction),
+    AsmProgram(Vec<AsmFunction>),
 }
 
 #[derive(Debug)]
@@ -45,7 +45,11 @@ pub enum AsmInstruction {
     },
     Label(String),
     AllocateStack(i32),
+    DeallocateStack(i32),
     Ret,
+    Push(AsmOperand),
+    Pop(AsmOperand),
+    Call(String),
 }
 
 #[derive(Debug, Clone)]
@@ -70,10 +74,15 @@ pub enum AsmBinaryOp {
 
 #[derive(Debug, Clone)]
 pub enum AsmRegister {
-    EAX,
-    EDX,
-    R10d,
-    R11d,
+    RAX,
+    RCX,
+    RDX,
+    RDI,
+    RSI,
+    R8,
+    R9,
+    R10,
+    R11,
 }
 
 #[derive(Debug)]
@@ -107,15 +116,54 @@ impl AsmProgram {
 
     pub fn generate_assembly(&mut self, tac: TacAst) -> AsmAst {
         match tac {
-            TacAst::TacProgram(function) => AsmAst::AsmProgram(self.parse_tac_function(function)),
+            TacAst::TacProgram(func_declarations) => {
+                let mut functions = Vec::new();
+
+                for func_decl in func_declarations {
+                    functions.push(self.parse_tac_function(func_decl));
+                }
+
+                AsmAst::AsmProgram(functions)
+            }
         }
     }
 
     fn parse_tac_function(&mut self, function: TacFunction) -> AsmFunction {
+        self.stack_index = 0;
+        self.stack_map.clear();
         let mut asm_instructions: Vec<AsmInstruction> = Vec::new();
 
+        let arg_registers = [
+            AsmRegister::RDI,
+            AsmRegister::RSI,
+            AsmRegister::RDX,
+            AsmRegister::RCX,
+            AsmRegister::R8,
+            AsmRegister::R9,
+        ];
+
+        for (i, param) in function.params.iter().enumerate() {
+            if i < 6 {
+                let offset = self.get_var_offset(param);
+                self.emit_mov(
+                    &mut asm_instructions,
+                    AsmOperand::Reg(arg_registers[i].clone()),
+                    AsmOperand::Stack(offset),
+                );
+            } else {
+                // 7th arg is at rbp + 16, 8th at rbp + 24, etc.
+                let offset = 16 + (i as i32 - 6) * 8;
+                self.stack_map.insert(param.clone(), offset);
+            }
+        }
+
         self.parse_tac_instructions(&function.body, &mut asm_instructions);
-        asm_instructions.insert(0, AsmInstruction::AllocateStack(self.stack_index));
+        let stack_size = if self.stack_index % 16 != 0 {
+            self.stack_index - (16 - (self.stack_index.abs() % 16))
+        } else {
+            self.stack_index
+        };
+        asm_instructions.insert(0, AsmInstruction::AllocateStack(stack_size));
 
         AsmFunction {
             name: function.name,
@@ -133,7 +181,7 @@ impl AsmProgram {
                 TacInstruction::Ret(val) => {
                     asm_instructions.push(AsmInstruction::Mov {
                         src: self.to_asm_operand(&val),
-                        dst: AsmOperand::Reg(AsmRegister::EAX),
+                        dst: AsmOperand::Reg(AsmRegister::RAX),
                     });
                     asm_instructions.push(AsmInstruction::Ret);
                 }
@@ -205,13 +253,13 @@ impl AsmProgram {
                             self.emit_mov(
                                 asm_instructions,
                                 asm_src1,
-                                AsmOperand::Reg(AsmRegister::EAX),
+                                AsmOperand::Reg(AsmRegister::RAX),
                             );
                             asm_instructions.push(AsmInstruction::Cdq);
                             self.emit_idiv(asm_instructions, asm_src2);
                             self.emit_mov(
                                 asm_instructions,
-                                AsmOperand::Reg(AsmRegister::EAX),
+                                AsmOperand::Reg(AsmRegister::RAX),
                                 asm_dst,
                             );
                         }
@@ -219,13 +267,13 @@ impl AsmProgram {
                             self.emit_mov(
                                 asm_instructions,
                                 asm_src1,
-                                AsmOperand::Reg(AsmRegister::EAX),
+                                AsmOperand::Reg(AsmRegister::RAX),
                             );
                             asm_instructions.push(AsmInstruction::Cdq);
                             self.emit_idiv(asm_instructions, asm_src2);
                             self.emit_mov(
                                 asm_instructions,
-                                AsmOperand::Reg(AsmRegister::EDX),
+                                AsmOperand::Reg(AsmRegister::RDX),
                                 asm_dst,
                             );
                         }
@@ -297,26 +345,58 @@ impl AsmProgram {
                                 operand: asm_dst,
                             });
                         }
-                        _ => {
-                            let asm_binary_op = match op {
-                                TacBinaryOp::Add => AsmBinaryOp::Add,
-                                TacBinaryOp::Subtract => AsmBinaryOp::Sub,
-                                TacBinaryOp::Multiply => AsmBinaryOp::Mult,
-                                _ => {
-                                    panic!("Unexpected binary operation encountered: {:?}", op);
-                                }
-                            };
-                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
-                            asm_instructions.push(AsmInstruction::Binary {
-                                op: asm_binary_op,
-                                left: asm_dst,
-                                right: asm_src2,
-                            });
-                        }
                     }
                 }
-                _ => {
-                    panic!("Unsupported instruction {:?}", tac_instruction);
+                TacInstruction::FuncCall { name, args, dst } => {
+                    let arg_registers = [
+                        AsmRegister::RDI,
+                        AsmRegister::RSI,
+                        AsmRegister::RDX,
+                        AsmRegister::RCX,
+                        AsmRegister::R8,
+                        AsmRegister::R9,
+                    ];
+                    let stack_padding = if args.len() > 6 && args.len() % 2 == 1 {
+                        8
+                    } else {
+                        0
+                    };
+
+                    if stack_padding != 0 {
+                        asm_instructions.push(AsmInstruction::AllocateStack(stack_padding));
+                    }
+                    // First 6 args go to registers
+                    for (index, arg) in args.iter().take(6).enumerate() {
+                        let asm_op = self.to_asm_operand(arg);
+
+                        self.emit_mov(
+                            asm_instructions,
+                            asm_op,
+                            AsmOperand::Reg(arg_registers[index].clone()),
+                        );
+                    }
+
+                    // Arguments are placed on stack in reverse order
+                    for arg in args.iter().skip(6).rev() {
+                        let asm_op = self.to_asm_operand(arg);
+                        self.emit_mov(asm_instructions, asm_op, AsmOperand::Reg(AsmRegister::RAX));
+                        asm_instructions
+                            .push(AsmInstruction::Push(AsmOperand::Reg(AsmRegister::RAX)));
+                    }
+
+                    asm_instructions.push(AsmInstruction::Call(name.clone()));
+
+                    if args.len() > 6 {
+                        let stack_args_size = (args.len() - 6) as i32 * 8;
+                        asm_instructions.push(AsmInstruction::DeallocateStack(
+                            stack_args_size + stack_padding,
+                        ));
+                    } else if stack_padding != 0 {
+                        asm_instructions.push(AsmInstruction::DeallocateStack(stack_padding));
+                    }
+
+                    let dst_op = self.to_asm_operand(dst);
+                    self.emit_mov(asm_instructions, AsmOperand::Reg(AsmRegister::RAX), dst_op);
                 }
             }
         }
@@ -331,7 +411,7 @@ impl AsmProgram {
     ) {
         if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: src,
                 dst: tmp_reg.clone(),
@@ -350,7 +430,7 @@ impl AsmProgram {
     fn emit_idiv(&mut self, asm_instructions: &mut Vec<AsmInstruction>, operand: AsmOperand) {
         if let AsmOperand::Imm(_) = &operand {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: operand,
                 dst: tmp_reg.clone(),
@@ -371,7 +451,7 @@ impl AsmProgram {
     ) {
         if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: src.clone(),
                 dst: tmp_reg.clone(),
@@ -401,7 +481,7 @@ impl AsmProgram {
     ) {
         if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: src.clone(),
                 dst: tmp_reg.clone(),
@@ -431,7 +511,7 @@ impl AsmProgram {
     ) {
         if let AsmOperand::Stack(_) = &dst {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R11d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R11);
             asm_instructions.push(AsmInstruction::Mov {
                 src: dst.clone(),
                 dst: tmp_reg.clone(),
@@ -463,7 +543,7 @@ impl AsmProgram {
     ) {
         if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&left, &right) {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R10d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: right.clone(),
                 dst: tmp_reg.clone(),
@@ -472,9 +552,9 @@ impl AsmProgram {
                 left,
                 right: tmp_reg.clone(),
             });
-        } else if let (AsmOperand::Imm(_)) = (&left) {
+        } else if let AsmOperand::Imm(_) = &left {
             // Use R10 as a temporary register for mem-to-mem moves
-            let tmp_reg = AsmOperand::Reg(AsmRegister::R11d);
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R11);
             asm_instructions.push(AsmInstruction::Mov {
                 src: left.clone(),
                 dst: tmp_reg.clone(),

@@ -16,15 +16,22 @@ impl CodeEmission {
         let mut instructions = Vec::new();
 
         match asm_ast {
-            AsmAst::AsmProgram(func) => self.emit_asm_function(func, &mut instructions),
+            AsmAst::AsmProgram(functions) => {
+                instructions.push("\t.intel_syntax noprefix\n".to_string());
+                for func in functions {
+                    instructions.push(format!("\t.globl _{}\n", func.name));
+                }
+
+                for func in functions {
+                    self.emit_asm_function(func, &mut instructions);
+                }
+            }
         }
 
         instructions
     }
 
     pub fn emit_asm_function(&mut self, asm_function: &AsmFunction, asm_code: &mut Vec<String>) {
-        asm_code.push("\t.intel_syntax noprefix\n".to_string());
-        asm_code.push(format!("\t.globl _{}\n", asm_function.name));
         asm_code.push(format!("_{}:\n", asm_function.name));
 
         //         for instr in &self.asm_instructions {
@@ -45,6 +52,9 @@ impl CodeEmission {
             match instruction {
                 AsmInstruction::AllocateStack(offset) => {
                     asm_code.push(format!("\tsub rsp, {}\n", offset.abs()));
+                }
+                AsmInstruction::DeallocateStack(offset) => {
+                    asm_code.push(format!("\tadd rsp, {}\n", offset.abs()));
                 }
                 AsmInstruction::Mov { src, dst } => {
                     asm_code.push(format!(
@@ -99,19 +109,33 @@ impl CodeEmission {
                 AsmInstruction::SetCC { condition, operand } => {
                     let cc = self.asm_conditional_to_string(condition);
                     let operand_str = match operand {
-                        AsmOperand::Stack(val) => format!("BYTE PTR [rbp - {}]", val.abs()),
-                        AsmOperand::Reg(reg) => match reg {
-                            AsmRegister::EAX => "al".to_string(),
-                            AsmRegister::EDX => "dl".to_string(),
-                            AsmRegister::R10d => "r10b".to_string(),
-                            AsmRegister::R11d => "r11b".to_string(),
-                        },
+                        AsmOperand::Stack(val) => {
+                            if *val < 0 {
+                                format!("BYTE PTR [rbp - {}]", val.abs())
+                            } else {
+                                format!("BYTE PTR [rbp + {}]", val)
+                            }
+                        }
+                        AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, 1),
                         _ => panic!("Invalid operand for SetCC: {:?}", operand),
                     };
                     asm_code.push(format!("set{} {}\n", cc.clone(), operand_str));
                 }
-                _ => {
-                    panic!("Unexpected instruction encountered: {:?}", asm_instructions);
+                // This is targeting 64b systems, so needs to be 8 byte aligned no matter the registers used
+                AsmInstruction::Pop(operand) => match operand {
+                    AsmOperand::Reg(reg) => {
+                        asm_code.push(format!("\tpop {}\n", self.asm_reg_to_string(reg, 8)));
+                    }
+                    _ => asm_code.push(format!("\tpop {}\n", self.asm_operand_to_string(operand))),
+                },
+                AsmInstruction::Push(operand) => match operand {
+                    AsmOperand::Reg(reg) => {
+                        asm_code.push(format!("\tpush {}\n", self.asm_reg_to_string(reg, 8)));
+                    }
+                    _ => asm_code.push(format!("\tpush {}\n", self.asm_operand_to_string(operand))),
+                },
+                AsmInstruction::Call(label) => {
+                    asm_code.push(format!("\tcall _{}\n", label));
                 }
             }
         }
@@ -120,9 +144,13 @@ impl CodeEmission {
     pub fn asm_operand_to_string(&mut self, asm_operand: &AsmOperand) -> String {
         match asm_operand {
             AsmOperand::Imm(val) => val.to_string(),
-            AsmOperand::Reg(reg) => self.asm_reg_to_string(reg),
+            AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, 4),
             AsmOperand::Stack(val) => {
-                format!("DWORD PTR [rbp - {}]", val.abs())
+                if *val < 0 {
+                    format!("DWORD PTR [rbp - {}]", val.abs())
+                } else {
+                    format!("DWORD PTR [rbp + {}]", val)
+                }
             }
         }
     }
@@ -140,14 +168,46 @@ impl CodeEmission {
         }
     }
 
-    pub fn asm_reg_to_string(&mut self, asm_reg: &AsmRegister) -> String {
-        match asm_reg {
-            AsmRegister::EAX => "eax".to_string(),
-            AsmRegister::EDX => "edx".to_string(),
-            AsmRegister::R10d => "r10d".to_string(),
-            AsmRegister::R11d => "r11d".to_string(),
+    pub fn asm_reg_to_string(&mut self, asm_reg: &AsmRegister, byte_size: usize) -> String {
+        if byte_size == 8 {
+            match asm_reg {
+                AsmRegister::RAX => "rax".to_string(),
+                AsmRegister::RCX => "rcx".to_string(),
+                AsmRegister::RDX => "rdx".to_string(),
+                AsmRegister::RDI => "rdi".to_string(),
+                AsmRegister::RSI => "rsi".to_string(),
+                AsmRegister::R8 => "r8".to_string(),
+                AsmRegister::R9 => "r9".to_string(),
+                AsmRegister::R10 => "r10".to_string(),
+                AsmRegister::R11 => "r11".to_string(),
+            }
+        } else if byte_size == 4 {
+            match asm_reg {
+                AsmRegister::RAX => "eax".to_string(),
+                AsmRegister::RCX => "ecx".to_string(),
+                AsmRegister::RDX => "edx".to_string(),
+                AsmRegister::RDI => "edi".to_string(),
+                AsmRegister::RSI => "esi".to_string(),
+                AsmRegister::R8 => "r8d".to_string(),
+                AsmRegister::R9 => "r9d".to_string(),
+                AsmRegister::R10 => "r10d".to_string(),
+                AsmRegister::R11 => "r11d".to_string(),
+            }
+        } else {
+            match asm_reg {
+                AsmRegister::RAX => "ax".to_string(),
+                AsmRegister::RCX => "cx".to_string(),
+                AsmRegister::RDX => "dx".to_string(),
+                AsmRegister::RDI => "di".to_string(),
+                AsmRegister::RSI => "si".to_string(),
+                AsmRegister::R8 => "r8b".to_string(),
+                AsmRegister::R9 => "r9b".to_string(),
+                AsmRegister::R10 => "r10b".to_string(),
+                AsmRegister::R11 => "r11b".to_string(),
+            }
         }
     }
+
     pub fn asm_conditional_to_string(&mut self, asm_cc: &AsmConditional) -> String {
         match asm_cc {
             AsmConditional::Equal => "e".to_string(),
