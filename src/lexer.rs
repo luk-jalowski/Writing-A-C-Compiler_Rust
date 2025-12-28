@@ -15,6 +15,8 @@ pub enum TokenType {
     KeywordFor,
     KeywordBreak,
     KeywordContinue,
+    KeywordStatic,
+    KeywordExtern,
 
     OpenParen,    // (
     CloseParen,   // )
@@ -266,6 +268,8 @@ impl<'a> Lexer<'a> {
                         "for" => TokenType::KeywordFor,
                         "break" => TokenType::KeywordBreak,
                         "continue" => TokenType::KeywordContinue,
+                        "static" => TokenType::KeywordStatic,
+                        "extern" => TokenType::KeywordExtern,
                         _ => TokenType::Identifier(word),
                     };
                     tokens.push(Token {
@@ -286,10 +290,10 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    pub fn lex_integer(&mut self) -> i32 {
+    fn lex_integer(&mut self) -> i32 {
         let mut num_str = String::new();
         while let Some(&c) = self.chars.peek() {
-            if c.is_digit(10) {
+            if c.is_ascii_digit() {
                 num_str.push(c);
                 self.chars.next();
             } else if c.is_ascii_alphabetic() {
@@ -301,7 +305,7 @@ impl<'a> Lexer<'a> {
         num_str.parse().expect("Expected to parse an integer")
     }
 
-    pub fn lex_word(&mut self) -> String {
+    fn lex_word(&mut self) -> String {
         let mut word = String::new();
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_alphanumeric() || c == '_' {
@@ -314,7 +318,7 @@ impl<'a> Lexer<'a> {
         word
     }
 
-    pub fn lex_forwardslash(&mut self, tokens: &mut Vec<Token>) {
+    fn lex_forwardslash(&mut self, tokens: &mut Vec<Token>) {
         // Consume the first '/'
         self.chars.next();
 

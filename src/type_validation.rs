@@ -2,23 +2,46 @@ use core::panic;
 use std::collections::HashMap;
 
 use crate::ast::{
-    AST, Block, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, VarDecl,
+    AST, Block, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, StorageClass,
+    VarDecl,
 };
 
-#[derive(Debug, PartialEq)]
-enum Type {
+#[derive(Debug, PartialEq, Clone)]
+pub enum Type {
     Int,
     FunType { param_count: u32 },
 }
 
+#[derive(Debug)]
 pub struct TypeValidation {
-    symbols: HashMap<String, (Type, bool)>,
+    pub symbols: HashMap<String, (Type, IdentifierAttribs)>,
+    current_scope_is_global: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdentifierAttribs {
+    FunAttr { defined: bool, global: bool },
+    StaticAttr { init: InitialValue, global: bool },
+}
+
+#[derive(Debug, Clone)]
+pub enum InitialValue {
+    Tentative,
+    Initial { value: u32 },
+    NoInitializer,
+}
+
+impl Default for TypeValidation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TypeValidation {
     pub fn new() -> Self {
         TypeValidation {
             symbols: HashMap::new(),
+            current_scope_is_global: true,
         }
     }
 
@@ -40,13 +63,11 @@ impl TypeValidation {
     }
 
     fn typecheck_function_declaration(&mut self, function: &mut FunDecl) {
-        let has_body = match function.body {
-            Some(_) => true,
-            None => false,
-        };
+        let has_body = function.body.is_some();
         let mut is_defined = has_body;
+        let mut is_global = function.storage_class != Some(StorageClass::Static);
 
-        if let Some((prev_decl, prev_defined)) = self.symbols.get(&function.name) {
+        if let Some((prev_decl, prev_attr)) = self.symbols.get(&function.name) {
             let param_count = match prev_decl {
                 Type::FunType { param_count } => *param_count,
                 _ => {
@@ -56,24 +77,39 @@ impl TypeValidation {
                     );
                 }
             };
-            if param_count != function.params.len() as u32 {
-                panic!(
-                    "typecheck_function_declaration Found duplicate function {} with different argument number {}, previous count {}",
-                    function.name,
-                    function.params.len(),
-                    param_count
-                );
-            }
-            if *prev_defined && has_body {
-                panic!(
-                    "typecheck_function_declaration Found duplicate function {} that has already been defined",
-                    function.name,
-                );
-            }
+            match prev_attr {
+                IdentifierAttribs::FunAttr { defined, global } => {
+                    if param_count != function.params.len() as u32 {
+                        panic!(
+                            "typecheck_function_declaration Found duplicate function {} with different argument number {}, previous count {}",
+                            function.name,
+                            function.params.len(),
+                            param_count
+                        );
+                    }
+                    if *defined && has_body {
+                        panic!(
+                            "typecheck_function_declaration Found duplicate function {} that has already been defined",
+                            function.name,
+                        );
+                    }
 
-            if *prev_defined {
-                is_defined = true;
-            }
+                    if *defined {
+                        is_defined = true;
+                    }
+
+                    if *global && function.storage_class == Some(StorageClass::Static) {
+                        panic!(
+                            "Static function declaration follows non-static - function name: {}",
+                            function.name
+                        );
+                    }
+                    is_global = *global;
+                }
+                _ => {
+                    panic!("Expected function attributes {:?}", prev_attr);
+                }
+            };
         }
 
         self.symbols.insert(
@@ -82,27 +118,161 @@ impl TypeValidation {
                 Type::FunType {
                     param_count: function.params.len() as u32,
                 },
-                is_defined,
+                IdentifierAttribs::FunAttr {
+                    defined: is_defined,
+                    global: is_global,
+                },
             ),
         );
 
         if has_body {
             for param in &mut function.params {
-                self.symbols.insert(param.clone(), (Type::Int, true));
+                self.symbols.insert(
+                    param.clone(),
+                    (
+                        Type::Int,
+                        IdentifierAttribs::FunAttr {
+                            defined: true,
+                            global: is_global,
+                        },
+                    ),
+                );
             }
             if let Some(block) = &mut function.body {
+                self.current_scope_is_global = false;
                 self.typecheck_block(block);
+                self.current_scope_is_global = true;
             }
         }
     }
 
     fn typecheck_var_declaration(&mut self, var_decl: &mut VarDecl) {
-        self.symbols
-            .insert(var_decl.name.clone(), (Type::Int, true));
+        let is_global_scope = self.current_scope_is_global;
+        let is_extern = var_decl.storage_class == Some(StorageClass::Extern);
+        let is_static = var_decl.storage_class == Some(StorageClass::Static);
+
+        // Determine initialization status
+        let mut init_val = if let Some(init) = &var_decl.init {
+            if is_global_scope || is_static {
+                match init {
+                    Expression::Constant(val) => InitialValue::Initial { value: *val as u32 },
+                    _ => InitialValue::Initial { value: 0 },
+                }
+            } else {
+                InitialValue::NoInitializer
+            }
+        } else if is_extern {
+            InitialValue::NoInitializer
+        } else if is_global_scope {
+            InitialValue::Tentative
+        } else if is_static {
+            InitialValue::Initial { value: 0 }
+        } else {
+            InitialValue::NoInitializer
+        };
+
+        let mut has_external_linkage = if is_extern {
+            true
+        } else if is_global_scope {
+            !is_static
+        } else {
+            false
+        };
+
+        // Check for conflicts with existing symbols
+        if let Some((prev_type, prev_attr)) = self.symbols.get(&var_decl.name) {
+            if *prev_type != Type::Int {
+                panic!(
+                    "Variable {} redeclared as different kind of symbol",
+                    var_decl.name
+                );
+            }
+
+            let prev_has_external_linkage = match prev_attr {
+                IdentifierAttribs::FunAttr { global, .. } => *global,
+                IdentifierAttribs::StaticAttr { global, .. } => *global,
+            };
+
+            if is_extern {
+                if !prev_has_external_linkage {
+                    has_external_linkage = false;
+                }
+            } else if is_global_scope
+                && prev_has_external_linkage != has_external_linkage {
+                    panic!("Conflicting linkage for {}", var_decl.name);
+                }
+
+            if is_global_scope
+                && let IdentifierAttribs::StaticAttr {
+                    init: prev_init, ..
+                } = prev_attr
+                {
+                    if matches!(init_val, InitialValue::Initial { .. })
+                        && matches!(prev_init, InitialValue::Initial { .. })
+                    {
+                        panic!("Redefinition of global variable {}", var_decl.name);
+                    }
+
+                    if matches!(prev_init, InitialValue::Initial { .. })
+                        || matches!(init_val, InitialValue::NoInitializer)
+                    {
+                        return;
+                    }
+                }
+
+            if let IdentifierAttribs::StaticAttr {
+                init: prev_init, ..
+            } = prev_attr
+                && matches!(init_val, InitialValue::NoInitializer) {
+                    init_val = prev_init.clone();
+                }
+        }
+
+        self.symbols.insert(
+            var_decl.name.clone(),
+            (
+                Type::Int,
+                IdentifierAttribs::StaticAttr {
+                    init: init_val,
+                    global: has_external_linkage,
+                },
+            ),
+        );
 
         if let Some(init) = &mut var_decl.init {
+            if is_extern && !is_global_scope {
+                panic!("Extern variable cannot have an initializer in block scope");
+            }
             self.typecheck_expression(init);
+            if (is_global_scope || is_static)
+                && !self.is_constant_expression(init) {
+                    panic!("Initializer element is not constant");
+                }
         };
+
+        if is_static && !is_global_scope {
+            var_decl.init = None;
+        }
+    }
+
+    fn is_constant_expression(&self, expr: &Expression) -> bool {
+        match expr {
+            Expression::Constant(_) => true,
+            Expression::UnaryExpr(_, inner) => self.is_constant_expression(inner),
+            Expression::BinaryExp(left, _, right) => {
+                self.is_constant_expression(left) && self.is_constant_expression(right)
+            }
+            Expression::Conditional {
+                condition,
+                exp1,
+                exp2,
+            } => {
+                self.is_constant_expression(condition)
+                    && self.is_constant_expression(exp1)
+                    && self.is_constant_expression(exp2)
+            }
+            _ => false,
+        }
     }
 
     fn typecheck_expression(&mut self, expr: &mut Expression) {

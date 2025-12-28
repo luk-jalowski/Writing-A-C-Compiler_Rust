@@ -8,17 +8,25 @@ pub struct FunDecl {
     pub name: String,
     pub params: Vec<String>,
     pub body: Option<Block>,
+    pub storage_class: Option<StorageClass>,
 }
 
 #[derive(Debug)]
 pub struct VarDecl {
     pub name: String,
     pub init: Option<Expression>,
+    pub storage_class: Option<StorageClass>,
 }
 
 #[derive(Debug)]
 pub struct Block {
     pub block_items: Vec<BlockItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StorageClass {
+    Static,
+    Extern,
 }
 
 #[derive(Debug)]
@@ -118,4 +126,9 @@ pub enum BinaryOperator {
     GreaterOrEqual,
     QuestionMark,
     Colon,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Types {
+    Integer32,
 }

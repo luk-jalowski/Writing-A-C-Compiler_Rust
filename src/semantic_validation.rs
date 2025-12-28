@@ -1,13 +1,26 @@
 use std::collections::HashMap;
 
-use crate::ast::{AST, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, VarDecl};
+use crate::ast::{
+    AST, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, StorageClass, VarDecl,
+};
+
+struct MapEntry {
+    tmp_name: String,
+    has_linkage: bool,
+}
 
 pub struct SemanticValidation {
-    scopes: Vec<HashMap<String, String>>,
+    scopes: Vec<HashMap<String, MapEntry>>,
     loop_stack: Vec<(String, String)>, // (break_label, continue_label)
     pub var_counter: usize,
     pub label_counter: usize,
 }
+impl Default for SemanticValidation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SemanticValidation {
     pub fn new() -> Self {
         SemanticValidation {
@@ -46,23 +59,28 @@ impl SemanticValidation {
             panic!("Nested function definitions are not permitted");
         }
 
-        if let Some(name) = self
+        if self.scopes.len() > 1 && matches!(function.storage_class, Some(StorageClass::Static)) {
+            panic!("Static function declaration in block scope is not allowed");
+        }
+
+        if let Some(entry) = self
             .scopes
             .last()
             .expect("Scope is empty")
             .get(&function.name)
-        {
-            if *name != function.name {
+            && entry.tmp_name != function.name {
                 panic!(
                     "<resolve_function_declaration> Duplicate function name found: {}",
                     function.name
                 );
             }
-        }
-        self.scopes
-            .last_mut()
-            .expect("Scope is empty")
-            .insert(function.name.clone(), function.name.clone());
+        self.scopes.last_mut().expect("Scope is empty").insert(
+            function.name.clone(),
+            MapEntry {
+                tmp_name: function.name.clone(),
+                has_linkage: true,
+            },
+        );
         self.scopes.push(HashMap::new());
 
         for param in &mut function.params {
@@ -79,10 +97,13 @@ impl SemanticValidation {
             }
 
             let temp_name = self.new_temp_var();
-            self.scopes
-                .last_mut()
-                .expect("Scope is empty")
-                .insert(param.clone(), temp_name.clone());
+            self.scopes.last_mut().expect("Scope is empty").insert(
+                param.clone(),
+                MapEntry {
+                    tmp_name: temp_name.clone(),
+                    has_linkage: false,
+                },
+            );
 
             *param = temp_name;
         }
@@ -115,25 +136,57 @@ impl SemanticValidation {
     }
 
     fn resolve_var_declaration(&mut self, var_decl: &mut VarDecl) {
-        if self
-            .scopes
-            .last()
-            .expect("Scope is empty")
-            .contains_key(&var_decl.name)
-        {
-            panic!(
-                "<resolve_declaration> Duplicate name found: {}",
-                var_decl.name
-            );
+        // let temp_name = self.new_temp_var();
+        let is_file_scope = self.scopes.len() == 1;
+
+        if is_file_scope {
+            if let Some(entry) = self
+                .scopes
+                .last()
+                .expect("Scope is empty")
+                .get(&var_decl.name)
+            {
+                if entry.tmp_name != var_decl.name {
+                    panic!(
+                        "<resolve_declaration> Duplicate name found: {}",
+                        var_decl.name
+                    );
+                }
+            } else {
+                self.scopes.last_mut().expect("Scope is empty").insert(
+                    var_decl.name.clone(),
+                    MapEntry {
+                        tmp_name: var_decl.name.clone(),
+                        has_linkage: true,
+                    },
+                );
+            }
+        } else {
+            let is_extern = matches!(var_decl.storage_class, Some(StorageClass::Extern));
+            if let Some(prev_entry) = self.scopes.last().unwrap().get(&var_decl.name)
+                && !(prev_entry.has_linkage && is_extern) {
+                    panic!("Conflicting local declarations for {}", var_decl.name);
+                }
+            if is_extern {
+                self.scopes.last_mut().unwrap().insert(
+                    var_decl.name.clone(),
+                    MapEntry {
+                        tmp_name: var_decl.name.clone(),
+                        has_linkage: true,
+                    },
+                );
+            } else {
+                let tmp_name = self.new_temp_var();
+                self.scopes.last_mut().unwrap().insert(
+                    var_decl.name.clone(),
+                    MapEntry {
+                        tmp_name: tmp_name.clone(),
+                        has_linkage: false,
+                    },
+                );
+                var_decl.name = tmp_name;
+            }
         }
-
-        let temp_name = self.new_temp_var();
-        self.scopes
-            .last_mut()
-            .expect("Scope is empty")
-            .insert(var_decl.name.clone(), temp_name.clone());
-
-        var_decl.name = temp_name;
 
         if let Some(init) = &mut var_decl.init {
             self.resolve_expression(init);
@@ -145,8 +198,8 @@ impl SemanticValidation {
             Expression::Var(name) => {
                 // We need rev cause we need last occurence of given name (inner scope)
                 match self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
-                    Some(new_name) => {
-                        *name = new_name.clone();
+                    Some(entry) => {
+                        *name = entry.tmp_name.clone();
                     }
                     _ => {
                         panic!(
@@ -179,8 +232,8 @@ impl SemanticValidation {
                 self.resolve_expression(exp2);
             }
             Expression::FunctionCall { name, args } => {
-                if let Some(new_name) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
-                    *name = new_name.clone();
+                if let Some(entry) = self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
+                    *name = entry.tmp_name.clone();
                 }
                 for arg in args {
                     self.resolve_expression(arg);
@@ -297,9 +350,12 @@ impl SemanticValidation {
         }
     }
 
-    pub fn resolve_for_init(&mut self, for_init: &mut ForInit) {
+    fn resolve_for_init(&mut self, for_init: &mut ForInit) {
         match for_init {
             ForInit::InitDeclaration(var_decl) => {
+                if var_decl.storage_class.is_some() {
+                    panic!("Variable declared in for loop cannot have storage class");
+                }
                 self.resolve_var_declaration(var_decl);
             }
             ForInit::InitExpression(expr) => {

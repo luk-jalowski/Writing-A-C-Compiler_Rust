@@ -10,7 +10,7 @@ pub struct Parser {
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Parser {
-            tokens: tokens,
+            tokens,
             current_positon: 0,
         }
     }
@@ -18,7 +18,7 @@ impl Parser {
     pub fn parse(&mut self) -> Result<AST, String> {
         self.parse_program()
     }
-    pub fn parse_program(&mut self) -> Result<AST, String> {
+    fn parse_program(&mut self) -> Result<AST, String> {
         let mut declarations = Vec::new();
         while let Some(token) = self.peek_token() {
             if token.token_type == TokenType::EOF {
@@ -29,7 +29,7 @@ impl Parser {
         Ok(AST::Program(declarations))
     }
 
-    pub fn parse_block(&mut self) -> Block {
+    fn parse_block(&mut self) -> Block {
         self.expect_token(TokenType::OpenBrace);
 
         let mut block_items: Vec<BlockItem> = Vec::new();
@@ -43,16 +43,19 @@ impl Parser {
         Block { block_items }
     }
 
-    pub fn parse_block_item(&mut self) -> BlockItem {
+    fn parse_block_item(&mut self) -> BlockItem {
         match self.peek_token().map(|t| t.token_type) {
-            Some(TokenType::KeywordInt) => BlockItem::Declaration(self.parse_declaration()),
+            Some(TokenType::KeywordInt)
+            | Some(TokenType::KeywordStatic)
+            | Some(TokenType::KeywordExtern) => BlockItem::Declaration(self.parse_declaration()),
             _ => BlockItem::Statement(self.parse_statement()),
         }
     }
 
-    // Both function and variable declaration start with "int" <identifier> (for now)
-    pub fn parse_declaration(&mut self) -> Declaration {
-        self.expect_token(TokenType::KeywordInt);
+    fn parse_declaration(&mut self) -> Declaration {
+        // Type is always int32 for now, ignore for now
+        let (_decl_type, storage_class) = self.parse_type_and_storage_class();
+
         let name = match self.consume_token() {
             Some(token) => match token.token_type {
                 TokenType::Identifier(name) => name,
@@ -69,15 +72,17 @@ impl Parser {
                 self.expect_token(TokenType::Semicolon);
 
                 Declaration::VarDecl(VarDecl {
-                    name: name,
+                    name,
                     init: Some(expr),
+                    storage_class,
                 })
             }
             Some(TokenType::Semicolon) => {
                 self.consume_token();
                 Declaration::VarDecl(VarDecl {
-                    name: name,
+                    name,
                     init: None,
+                    storage_class,
                 })
             }
             Some(TokenType::OpenParen) => {
@@ -91,6 +96,7 @@ impl Parser {
                         name,
                         params,
                         body: Some(body),
+                        storage_class,
                     })
                 } else {
                     self.expect_token(TokenType::Semicolon);
@@ -98,6 +104,7 @@ impl Parser {
                         name,
                         params,
                         body: None,
+                        storage_class,
                     })
                 }
             }
@@ -108,7 +115,56 @@ impl Parser {
         }
     }
 
-    pub fn parse_param_list(&mut self) -> Vec<String> {
+    fn parse_type_and_storage_class(&mut self) -> (Types, Option<StorageClass>) {
+        let mut types = Vec::<Types>::new();
+        let mut storage_classes = Vec::<StorageClass>::new();
+        while let Some(token) = self.peek_token() {
+            match token.token_type {
+                TokenType::KeywordInt => {
+                    self.consume_token();
+                    types.push(Types::Integer32);
+                }
+                TokenType::KeywordStatic => {
+                    self.consume_token();
+                    storage_classes.push(StorageClass::Static);
+                }
+                TokenType::KeywordExtern => {
+                    self.consume_token();
+                    storage_classes.push(StorageClass::Extern);
+                }
+                _ => {
+                    break;
+                }
+            }
+        }
+
+        // Declaration must have no more than one type
+        if types.len() != 1 {
+            panic!(
+                "Incorrect number of types for declaration {}: {:?}",
+                types.len(),
+                types
+            );
+        }
+        // And at most 1 storage class
+        if storage_classes.len() > 1 {
+            panic!(
+                "Incorrect number of storage classess for declaration {}: {:?}",
+                storage_classes.len(),
+                storage_classes
+            );
+        }
+
+        let storage_class: Option<StorageClass> = if storage_classes.len() == 1 {
+            Some(storage_classes[0])
+        } else {
+            None
+        };
+
+        (types[0], storage_class)
+    }
+
+    fn parse_param_list(&mut self) -> Vec<String> {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordVoid) => {
                 self.consume_token();
@@ -150,7 +206,7 @@ impl Parser {
         }
     }
 
-    pub fn parse_statement(&mut self) -> Statement {
+    fn parse_statement(&mut self) -> Statement {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordReturn) => {
                 self.consume_token();
@@ -273,8 +329,11 @@ impl Parser {
         }
     }
 
-    pub fn parse_for_init(&mut self) -> ForInit {
-        if let Some(TokenType::KeywordInt) = self.peek_token().map(|t| t.token_type) {
+    fn parse_for_init(&mut self) -> ForInit {
+        if let Some(TokenType::KeywordInt)
+        | Some(TokenType::KeywordStatic)
+        | Some(TokenType::KeywordExtern) = self.peek_token().map(|t| t.token_type)
+        {
             match self.parse_declaration() {
                 Declaration::VarDecl(var_decl) => ForInit::InitDeclaration(var_decl),
                 _ => {
@@ -293,7 +352,7 @@ impl Parser {
         }
     }
 
-    pub fn parse_factor(&mut self) -> Expression {
+    fn parse_factor(&mut self) -> Expression {
         match self.consume_token() {
             Some(token) => match token.token_type {
                 TokenType::Integer(val) => Expression::Constant(val),
@@ -329,7 +388,7 @@ impl Parser {
         }
     }
 
-    pub fn parse_argument_list(&mut self) -> Vec<Expression> {
+    fn parse_argument_list(&mut self) -> Vec<Expression> {
         let mut args = Vec::new();
 
         if let Some(TokenType::CloseParen) = self.peek_token().map(|t| t.token_type) {
@@ -346,7 +405,7 @@ impl Parser {
         args
     }
 
-    pub fn parse_expression(&mut self, min_prec: u32) -> Expression {
+    fn parse_expression(&mut self, min_prec: u32) -> Expression {
         let mut left = self.parse_factor();
         while let Some(next_token) = self.peek_token() {
             let precedence: u32 = match next_token.token_type {
@@ -410,7 +469,7 @@ impl Parser {
         left
     }
 
-    pub fn expect_token(&mut self, expected: TokenType) {
+    fn expect_token(&mut self, expected: TokenType) {
         match self.consume_token() {
             Some(token) => {
                 if std::mem::discriminant(&token.token_type) != std::mem::discriminant(&expected) {
@@ -421,7 +480,7 @@ impl Parser {
         }
     }
 
-    pub fn peek_token(&mut self) -> Option<Token> {
+    fn peek_token(&mut self) -> Option<Token> {
         if self.current_positon >= self.tokens.len() {
             return None;
         }
@@ -430,7 +489,7 @@ impl Parser {
         Some(token)
     }
 
-    pub fn consume_token(&mut self) -> Option<Token> {
+    fn consume_token(&mut self) -> Option<Token> {
         if self.current_positon >= self.tokens.len() {
             return None;
         }

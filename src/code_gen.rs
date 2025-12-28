@@ -1,16 +1,29 @@
 use std::collections::HashMap;
 
-use crate::tac::{TacAst, TacBinaryOp, TacFunction, TacInstruction, TacOperand, TacUnaryOp};
+use crate::tac::{
+    TacAst, TacBinaryOp, TacFunction, TacInstruction, TacOperand, TacTopLevel, TacUnaryOp,
+};
 
 #[derive(Debug)]
 pub enum AsmAst {
-    AsmProgram(Vec<AsmFunction>),
+    AsmProgram(Vec<AsmTopLevel>),
+}
+
+#[derive(Debug)]
+pub enum AsmTopLevel {
+    Function(AsmFunction),
+    StaticVariable {
+        name: String,
+        init: i32,
+        global: bool,
+    },
 }
 
 #[derive(Debug)]
 pub struct AsmFunction {
     pub name: String,
     pub body: Vec<AsmInstruction>,
+    pub global: bool,
 }
 
 #[derive(Debug)]
@@ -57,6 +70,7 @@ pub enum AsmOperand {
     Reg(AsmRegister),
     Imm(i32),
     Stack(i32),
+    Data(String),
 }
 
 #[derive(Debug)]
@@ -102,12 +116,19 @@ pub struct AsmProgram {
     stack_index: i32,
 }
 
+impl Default for AsmProgram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AsmProgram {
     pub fn new() -> Self {
         AsmProgram {
             asm_program: AsmFunction {
                 name: "".to_string(),
                 body: Vec::new(),
+                global: true,
             },
             stack_map: HashMap::new(),
             stack_index: 0,
@@ -117,13 +138,21 @@ impl AsmProgram {
     pub fn generate_assembly(&mut self, tac: TacAst) -> AsmAst {
         match tac {
             TacAst::TacProgram(func_declarations) => {
-                let mut functions = Vec::new();
+                let mut top_level = Vec::<AsmTopLevel>::new();
 
-                for func_decl in func_declarations {
-                    functions.push(self.parse_tac_function(func_decl));
+                for decl in func_declarations {
+                    match decl {
+                        TacTopLevel::Function(function) => {
+                            top_level
+                                .push(AsmTopLevel::Function(self.parse_tac_function(function)));
+                        }
+                        TacTopLevel::StaticVariable { name, init, global } => {
+                            top_level.push(AsmTopLevel::StaticVariable { name, init, global });
+                        }
+                    }
                 }
 
-                AsmAst::AsmProgram(functions)
+                AsmAst::AsmProgram(top_level)
             }
         }
     }
@@ -168,6 +197,7 @@ impl AsmProgram {
         AsmFunction {
             name: function.name,
             body: asm_instructions,
+            global: function.global,
         }
     }
 
@@ -180,7 +210,7 @@ impl AsmProgram {
             match tac_instruction {
                 TacInstruction::Ret(val) => {
                     asm_instructions.push(AsmInstruction::Mov {
-                        src: self.to_asm_operand(&val),
+                        src: self.to_asm_operand(val),
                         dst: AsmOperand::Reg(AsmRegister::RAX),
                     });
                     asm_instructions.push(AsmInstruction::Ret);
@@ -409,20 +439,20 @@ impl AsmProgram {
         src: AsmOperand,
         dst: AsmOperand,
     ) {
-        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
+        if self.is_memory(&dst) && self.is_memory(&src) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
-                src: src,
+                src,
                 dst: tmp_reg.clone(),
             });
             asm_instructions.push(AsmInstruction::Mov {
                 src: tmp_reg,
-                dst: dst,
+                dst,
             });
         } else {
             // Direct move is fine
-            asm_instructions.push(AsmInstruction::Mov { src: src, dst: dst });
+            asm_instructions.push(AsmInstruction::Mov { src, dst });
         }
     }
 
@@ -449,7 +479,7 @@ impl AsmProgram {
         src: AsmOperand,
         dst: AsmOperand,
     ) {
-        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
+        if self.is_memory(&dst) && self.is_memory(&src) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
@@ -479,7 +509,7 @@ impl AsmProgram {
         src: AsmOperand,
         dst: AsmOperand,
     ) {
-        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&dst, &src) {
+        if self.is_memory(&dst) && self.is_memory(&src) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
@@ -509,7 +539,7 @@ impl AsmProgram {
         src: AsmOperand,
         dst: AsmOperand,
     ) {
-        if let AsmOperand::Stack(_) = &dst {
+        if self.is_memory(&dst) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R11);
             asm_instructions.push(AsmInstruction::Mov {
@@ -541,7 +571,7 @@ impl AsmProgram {
         left: AsmOperand,
         right: AsmOperand,
     ) {
-        if let (AsmOperand::Stack(_), AsmOperand::Stack(_)) = (&left, &right) {
+        if self.is_memory(&left) && self.is_memory(&right) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
@@ -572,6 +602,7 @@ impl AsmProgram {
         match tac_operand {
             TacOperand::Const(val) => AsmOperand::Imm(*val),
             TacOperand::Var(val) => AsmOperand::Stack(self.get_var_offset(val)),
+            TacOperand::Static(val) => AsmOperand::Data(val.clone()),
         }
     }
 
@@ -582,5 +613,9 @@ impl AsmProgram {
             self.stack_index -= 4; // currently only 32 bit
             self.stack_index
         })
+    }
+
+    fn is_memory(&self, op: &AsmOperand) -> bool {
+        matches!(op, AsmOperand::Stack(_) | AsmOperand::Data(_))
     }
 }

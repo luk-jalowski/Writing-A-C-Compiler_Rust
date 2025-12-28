@@ -1,19 +1,33 @@
 use core::panic;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     AST, BinaryOperator, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement,
     UnaryOperator, VarDecl,
 };
+use crate::type_validation::{IdentifierAttribs, InitialValue, Type};
 
 #[derive(Debug)]
 pub enum TacAst {
-    TacProgram(Vec<TacFunction>),
+    TacProgram(Vec<TacTopLevel>),
 }
+
+#[derive(Debug)]
+pub enum TacTopLevel {
+    Function(TacFunction),
+    StaticVariable {
+        name: String,
+        init: i32,
+        global: bool,
+    },
+}
+
 #[derive(Debug)]
 pub struct TacFunction {
     pub name: String,
     pub params: Vec<String>,
     pub body: Vec<TacInstruction>,
+    pub global: bool,
 }
 
 #[derive(Debug)]
@@ -57,6 +71,7 @@ pub enum TacInstruction {
 #[derive(Debug, Clone)]
 pub enum TacOperand {
     Var(String),
+    Static(String),
     Const(i32),
 }
 
@@ -86,6 +101,7 @@ pub enum TacBinaryOp {
 pub struct TacProgram {
     var_counter: usize,
     label_counter: usize,
+    static_vars: HashSet<String>,
 }
 
 impl TacProgram {
@@ -93,6 +109,7 @@ impl TacProgram {
         TacProgram {
             var_counter,
             label_counter,
+            static_vars: HashSet::new(),
         }
     }
 
@@ -108,18 +125,81 @@ impl TacProgram {
         label
     }
 
-    pub fn generate_tac(&mut self, ast: AST) -> TacAst {
+    pub fn generate_tac(
+        &mut self,
+        ast: AST,
+        symbols: &HashMap<String, (Type, IdentifierAttribs)>,
+    ) -> TacAst {
         match ast {
             AST::Program(declarations) => {
-                let mut functions = Vec::new();
-                for decl in declarations {
-                    if let Declaration::FunDecl(func) = decl {
-                        if func.body.is_some() {
-                            functions.push(self.parse_function(func));
+                self.static_vars.clear();
+                for (name, (_, attr)) in symbols {
+                    if let IdentifierAttribs::StaticAttr { init, .. } = attr {
+                        match init {
+                            InitialValue::Initial { .. } | InitialValue::Tentative => {
+                                self.static_vars.insert(name.clone());
+                            }
+                            InitialValue::NoInitializer => {
+                                if !name.starts_with("tmp.") {
+                                    self.static_vars.insert(name.clone());
+                                }
+                            }
                         }
                     }
                 }
-                TacAst::TacProgram(functions)
+
+                let mut top_level = Vec::<TacTopLevel>::new();
+                for decl in declarations {
+                    match decl {
+                        Declaration::FunDecl(func) => {
+                            if func.body.is_some() {
+                                let mut tac_func = self.parse_function(func);
+                                if let Some((_, IdentifierAttribs::FunAttr { global, .. })) =
+                                    symbols.get(&tac_func.name)
+                                {
+                                    tac_func.global = *global;
+                                }
+                                top_level.push(TacTopLevel::Function(tac_func));
+                            }
+                        }
+                        Declaration::VarDecl(_) => {
+                            // Handled via symbols
+                        }
+                    }
+                }
+
+                let mut static_vars = Vec::new();
+                for (name, (_type, attr)) in symbols {
+                    if let IdentifierAttribs::StaticAttr { init, global } = attr {
+                        match init {
+                            InitialValue::Initial { value } => {
+                                static_vars.push(TacTopLevel::StaticVariable {
+                                    name: name.clone(),
+                                    global: *global,
+                                    init: *value as i32,
+                                });
+                            }
+                            InitialValue::Tentative => {
+                                static_vars.push(TacTopLevel::StaticVariable {
+                                    name: name.clone(),
+                                    global: *global,
+                                    init: 0,
+                                });
+                            }
+                            InitialValue::NoInitializer => continue,
+                        }
+                    }
+                }
+                static_vars.sort_by(|a, b| match (a, b) {
+                    (
+                        TacTopLevel::StaticVariable { name: a, .. },
+                        TacTopLevel::StaticVariable { name: b, .. },
+                    ) => a.cmp(b),
+                    _ => std::cmp::Ordering::Equal,
+                });
+                top_level.extend(static_vars);
+
+                TacAst::TacProgram(top_level)
             }
         }
     }
@@ -142,6 +222,7 @@ impl TacProgram {
             name: function.name,
             params: function.params,
             body: tac_instructions,
+            global: false,
         }
     }
 
@@ -442,14 +523,25 @@ impl TacProgram {
 
                 dst
             }
-            Expression::Var(name) => TacOperand::Var(name),
+            Expression::Var(name) => {
+                if self.static_vars.contains(&name) {
+                    TacOperand::Static(name)
+                } else {
+                    TacOperand::Var(name)
+                }
+            }
             Expression::Assignment(left, right) => {
                 let src_right = self.parse_expression(*right, tac_instructions);
 
                 if let Expression::Var(name) = *left {
+                    let dst = if self.static_vars.contains(&name) {
+                        TacOperand::Static(name)
+                    } else {
+                        TacOperand::Var(name)
+                    };
                     tac_instructions.push(TacInstruction::Copy {
                         src: src_right.clone(),
-                        dst: TacOperand::Var(name),
+                        dst,
                     });
                     src_right
                 } else {
@@ -509,11 +601,7 @@ impl TacProgram {
         }
     }
 
-    pub fn parse_for_init(
-        &mut self,
-        for_init: ForInit,
-        tac_instructions: &mut Vec<TacInstruction>,
-    ) {
+    fn parse_for_init(&mut self, for_init: ForInit, tac_instructions: &mut Vec<TacInstruction>) {
         match for_init {
             ForInit::InitDeclaration(decl) => {
                 self.parse_var_declaration(decl, tac_instructions);

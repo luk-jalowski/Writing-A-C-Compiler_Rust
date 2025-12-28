@@ -2,10 +2,16 @@ use core::panic;
 
 use crate::code_gen::{
     AsmAst, AsmBinaryOp, AsmConditional, AsmFunction, AsmInstruction, AsmOperand, AsmRegister,
-    AsmUnaryOp,
+    AsmTopLevel, AsmUnaryOp,
 };
 
 pub struct CodeEmission {}
+
+impl Default for CodeEmission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CodeEmission {
     pub fn new() -> Self {
@@ -16,14 +22,36 @@ impl CodeEmission {
         let mut instructions = Vec::new();
 
         match asm_ast {
-            AsmAst::AsmProgram(functions) => {
+            AsmAst::AsmProgram(top_level) => {
                 instructions.push("\t.intel_syntax noprefix\n".to_string());
-                for func in functions {
-                    instructions.push(format!("\t.globl _{}\n", func.name));
+
+                for item in top_level {
+                    if let AsmTopLevel::Function(func) = item {
+                        if func.global {
+                            instructions.push(format!("\t.globl _{}\n", func.name));
+                        }
+                        self.emit_asm_function(func, &mut instructions);
+                    }
                 }
 
-                for func in functions {
-                    self.emit_asm_function(func, &mut instructions);
+                instructions.push("\t.data\n".to_string());
+                for item in top_level {
+                    if let AsmTopLevel::StaticVariable { name, init, global } = item {
+                        if *global {
+                            instructions.push(format!("\t.globl _{}\n", name));
+                        }
+                        if *init == 0 {
+                            instructions.push("\t.bss\n".to_string());
+                            instructions.push("\t.balign 4\n".to_string()); // MACOS or Linux directive
+                            instructions.push(format!("_{}:\n", name));
+                            instructions.push("\t.zero 4\n".to_string());
+                        } else {
+                            instructions.push("\t.data\n".to_string());
+                            instructions.push("\t.balign 4\n".to_string());
+                            instructions.push(format!("_{}:\n", name));
+                            instructions.push(format!("\t.long {}\n", init));
+                        }
+                    }
                 }
             }
         }
@@ -31,22 +59,19 @@ impl CodeEmission {
         instructions
     }
 
-    pub fn emit_asm_function(&mut self, asm_function: &AsmFunction, asm_code: &mut Vec<String>) {
+    fn emit_asm_function(&mut self, asm_function: &AsmFunction, asm_code: &mut Vec<String>) {
         asm_code.push(format!("_{}:\n", asm_function.name));
 
-        //         for instr in &self.asm_instructions {
-        //             write!(f, "{}", instr)?;
-        //         }
         self.emit_asm_instructions(&asm_function.body, asm_code);
     }
 
-    pub fn emit_asm_instructions(
+    fn emit_asm_instructions(
         &mut self,
         asm_instructions: &Vec<AsmInstruction>,
         asm_code: &mut Vec<String>,
     ) {
-        asm_code.push(format!("\tpush rbp\n"));
-        asm_code.push(format!("\tmov rbp, rsp\n"));
+        asm_code.push("\tpush rbp\n".to_string());
+        asm_code.push("\tmov rbp, rsp\n".to_string());
 
         for instruction in asm_instructions {
             match instruction {
@@ -64,9 +89,9 @@ impl CodeEmission {
                     ));
                 }
                 AsmInstruction::Ret => {
-                    asm_code.push(format!("\tmov rsp, rbp\n"));
-                    asm_code.push(format!("\tpop rbp\n"));
-                    asm_code.push(format!("\tret\n"));
+                    asm_code.push("\tmov rsp, rbp\n".to_string());
+                    asm_code.push("\tpop rbp\n".to_string());
+                    asm_code.push("\tret\n".to_string());
                 }
                 AsmInstruction::Unary { op, operand } => {
                     asm_code.push(format!(
@@ -87,7 +112,7 @@ impl CodeEmission {
                     asm_code.push(format!("\tidiv {}\n", self.asm_operand_to_string(operand)));
                 }
                 AsmInstruction::Cdq => {
-                    asm_code.push(format!("\tcdq\n"));
+                    asm_code.push("\tcdq\n".to_string());
                 }
                 AsmInstruction::Cmp { left, right } => {
                     asm_code.push(format!(
@@ -117,6 +142,7 @@ impl CodeEmission {
                             }
                         }
                         AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, 1),
+                        AsmOperand::Data(name) => format!("BYTE PTR [rip + _{}]", name),
                         _ => panic!("Invalid operand for SetCC: {:?}", operand),
                     };
                     asm_code.push(format!("set{} {}\n", cc.clone(), operand_str));
@@ -141,7 +167,7 @@ impl CodeEmission {
         }
     }
 
-    pub fn asm_operand_to_string(&mut self, asm_operand: &AsmOperand) -> String {
+    fn asm_operand_to_string(&mut self, asm_operand: &AsmOperand) -> String {
         match asm_operand {
             AsmOperand::Imm(val) => val.to_string(),
             AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, 4),
@@ -152,15 +178,16 @@ impl CodeEmission {
                     format!("DWORD PTR [rbp + {}]", val)
                 }
             }
+            AsmOperand::Data(name) => format!("DWORD PTR [rip + _{}]", name),
         }
     }
-    pub fn asm_unary_operator_to_string(&mut self, asm_op: &AsmUnaryOp) -> String {
+    fn asm_unary_operator_to_string(&mut self, asm_op: &AsmUnaryOp) -> String {
         match asm_op {
             AsmUnaryOp::Neg => "neg".to_string(),
             AsmUnaryOp::Not => "not".to_string(),
         }
     }
-    pub fn asm_binary_operator_to_string(&mut self, asm_op: &AsmBinaryOp) -> String {
+    fn asm_binary_operator_to_string(&mut self, asm_op: &AsmBinaryOp) -> String {
         match asm_op {
             AsmBinaryOp::Add => "add".to_string(),
             AsmBinaryOp::Mult => "imul".to_string(),
@@ -168,7 +195,7 @@ impl CodeEmission {
         }
     }
 
-    pub fn asm_reg_to_string(&mut self, asm_reg: &AsmRegister, byte_size: usize) -> String {
+    fn asm_reg_to_string(&mut self, asm_reg: &AsmRegister, byte_size: usize) -> String {
         if byte_size == 8 {
             match asm_reg {
                 AsmRegister::RAX => "rax".to_string(),
@@ -208,7 +235,7 @@ impl CodeEmission {
         }
     }
 
-    pub fn asm_conditional_to_string(&mut self, asm_cc: &AsmConditional) -> String {
+    fn asm_conditional_to_string(&mut self, asm_cc: &AsmConditional) -> String {
         match asm_cc {
             AsmConditional::Equal => "e".to_string(),
             AsmConditional::NotEqual => "ne".to_string(),

@@ -82,7 +82,7 @@ fn main() {
     }
 
     let mut tac_program = TacProgram::new(semantic_validation.var_counter, 0);
-    let tac_ast = tac_program.generate_tac(ast);
+    let tac_ast = tac_program.generate_tac(ast, &type_validation.symbols);
     println!("Generated TAC representation:\n {:?}", tac_ast);
 
     if args.tacky {
