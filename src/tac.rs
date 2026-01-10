@@ -2,10 +2,10 @@ use core::panic;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    AST, BinaryOperator, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement,
-    UnaryOperator, VarDecl,
+    AST, BinaryOperator, BlockItem, Const, Declaration, Expression, ForInit, FunDecl, Statement,
+    Type, TypedExpression, UnaryOperator, VarDecl,
 };
-use crate::type_validation::{IdentifierAttribs, InitialValue, Type};
+use crate::type_validation::{IdentifierAttribs, InitialValue, StaticInit};
 
 #[derive(Debug)]
 pub enum TacAst {
@@ -17,8 +17,9 @@ pub enum TacTopLevel {
     Function(TacFunction),
     StaticVariable {
         name: String,
-        init: i32,
+        init: StaticInit,
         global: bool,
+        var_type: Type,
     },
 }
 
@@ -26,6 +27,7 @@ pub enum TacTopLevel {
 pub struct TacFunction {
     pub name: String,
     pub params: Vec<String>,
+    pub param_types: Vec<Type>,
     pub body: Vec<TacInstruction>,
     pub global: bool,
 }
@@ -66,13 +68,24 @@ pub enum TacInstruction {
         args: Vec<TacOperand>,
         dst: TacOperand,
     },
+    SignExtend {
+        src: TacOperand,
+        dst: TacOperand,
+    },
+    Truncate {
+        src: TacOperand,
+        dst: TacOperand,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum TacOperand {
-    Var(String),
-    Static(String),
-    Const(i32),
+    Var {
+        name: String,
+        var_type: Type,
+        is_static: bool,
+    },
+    Const(Const),
 }
 
 #[derive(Debug, PartialEq)]
@@ -113,10 +126,14 @@ impl TacProgram {
         }
     }
 
-    fn new_temp_var(&mut self) -> TacOperand {
+    fn new_temp_var(&mut self, var_type: Type) -> TacOperand {
         let tmp = format!("tmp.{}", self.var_counter);
         self.var_counter += 1;
-        TacOperand::Var(tmp.to_string())
+        TacOperand::Var {
+            name: tmp.to_string(),
+            var_type,
+            is_static: false,
+        }
     }
 
     fn new_label(&mut self) -> String {
@@ -169,23 +186,38 @@ impl TacProgram {
                 }
 
                 let mut static_vars = Vec::new();
-                for (name, (_type, attr)) in symbols {
+                for (name, (symbol_type, attr)) in symbols {
                     if let IdentifierAttribs::StaticAttr { init, global } = attr {
                         match init {
-                            InitialValue::Initial { value } => {
+                            InitialValue::Initial(static_value) => {
                                 static_vars.push(TacTopLevel::StaticVariable {
                                     name: name.clone(),
                                     global: *global,
-                                    init: *value as i32,
+                                    init: static_value.clone(),
+                                    var_type: symbol_type.clone(),
                                 });
                             }
-                            InitialValue::Tentative => {
-                                static_vars.push(TacTopLevel::StaticVariable {
-                                    name: name.clone(),
-                                    global: *global,
-                                    init: 0,
-                                });
-                            }
+                            InitialValue::Tentative => match symbol_type {
+                                Type::Int => {
+                                    static_vars.push(TacTopLevel::StaticVariable {
+                                        name: name.clone(),
+                                        global: *global,
+                                        init: StaticInit::IntInit(0),
+                                        var_type: symbol_type.clone(),
+                                    });
+                                }
+                                Type::Long => {
+                                    static_vars.push(TacTopLevel::StaticVariable {
+                                        name: name.clone(),
+                                        global: *global,
+                                        init: StaticInit::LongInit(0),
+                                        var_type: symbol_type.clone(),
+                                    });
+                                }
+                                _ => {
+                                    panic!("generate_tac Unsupported type {:?}", symbol_type)
+                                }
+                            },
                             InitialValue::NoInitializer => continue,
                         }
                     }
@@ -215,12 +247,18 @@ impl TacProgram {
 
         // Add 0 if there is no implicit return
         if !matches!(tac_instructions.last(), Some(TacInstruction::Ret(_))) {
-            tac_instructions.push(TacInstruction::Ret(TacOperand::Const(0)));
+            tac_instructions.push(TacInstruction::Ret(TacOperand::Const(Const::ConstInt(0))));
         }
+
+        let param_types = match function.func_type {
+            Type::FuncType { params, .. } => params,
+            _ => vec![],
+        };
 
         TacFunction {
             name: function.name,
             params: function.params,
+            param_types,
             body: tac_instructions,
             global: false,
         }
@@ -261,9 +299,14 @@ impl TacProgram {
     ) {
         if let Some(expr) = var_decl.init {
             let src = self.parse_expression(expr, tac_instructions);
+            let is_static = self.static_vars.contains(&var_decl.name);
             tac_instructions.push(TacInstruction::Copy {
                 src,
-                dst: TacOperand::Var(var_decl.name),
+                dst: TacOperand::Var {
+                    name: var_decl.name,
+                    var_type: var_decl.var_type,
+                    is_static,
+                },
             });
         }
     }
@@ -400,14 +443,18 @@ impl TacProgram {
 
     fn parse_expression(
         &mut self,
-        expression: Expression,
+        expression: TypedExpression,
         tac_instructions: &mut Vec<TacInstruction>,
     ) -> TacOperand {
-        match expression {
+        match expression.expr {
             Expression::Constant(val) => TacOperand::Const(val),
             Expression::UnaryExpr(op, inner_expr) => {
                 let src = self.parse_expression(*inner_expr, tac_instructions);
-                let dst = self.new_temp_var();
+                let dst = self.new_temp_var(
+                    expression
+                        .etype
+                        .expect("Expessions is expected to have type!"),
+                );
                 let tac_op = match op {
                     UnaryOperator::Complement => TacUnaryOp::Complement,
                     UnaryOperator::Negate => TacUnaryOp::Negate,
@@ -427,7 +474,11 @@ impl TacProgram {
                     BinaryOperator::And => {
                         let false_label = self.new_label();
                         let end_label = self.new_label();
-                        let dst = self.new_temp_var();
+                        let dst = self.new_temp_var(
+                            expression
+                                .etype
+                                .expect("Expessions is expected to have type!"),
+                        );
 
                         let src_left = self.parse_expression(*left, tac_instructions);
 
@@ -441,7 +492,7 @@ impl TacProgram {
                             target: false_label.clone(),
                         });
                         tac_instructions.push(TacInstruction::Copy {
-                            src: TacOperand::Const(1),
+                            src: TacOperand::Const(Const::ConstInt(1)),
                             dst: dst.clone(),
                         });
                         tac_instructions.push(TacInstruction::Jump {
@@ -451,7 +502,7 @@ impl TacProgram {
                         tac_instructions.push(TacInstruction::Label(false_label));
 
                         tac_instructions.push(TacInstruction::Copy {
-                            src: TacOperand::Const(0),
+                            src: TacOperand::Const(Const::ConstInt(0)),
                             dst: dst.clone(),
                         });
                         tac_instructions.push(TacInstruction::Label(end_label));
@@ -461,7 +512,11 @@ impl TacProgram {
                     BinaryOperator::Or => {
                         let true_label = self.new_label();
                         let end_label = self.new_label();
-                        let dst = self.new_temp_var();
+                        let dst = self.new_temp_var(
+                            expression
+                                .etype
+                                .expect("Expessions is expected to have type!"),
+                        );
 
                         let src_left = self.parse_expression(*left, tac_instructions);
 
@@ -475,7 +530,7 @@ impl TacProgram {
                             target: true_label.clone(),
                         });
                         tac_instructions.push(TacInstruction::Copy {
-                            src: TacOperand::Const(0),
+                            src: TacOperand::Const(Const::ConstInt(0)),
                             dst: dst.clone(),
                         });
                         tac_instructions.push(TacInstruction::Jump {
@@ -485,7 +540,7 @@ impl TacProgram {
                         tac_instructions.push(TacInstruction::Label(true_label));
 
                         tac_instructions.push(TacInstruction::Copy {
-                            src: TacOperand::Const(1),
+                            src: TacOperand::Const(Const::ConstInt(1)),
                             dst: dst.clone(),
                         });
                         tac_instructions.push(TacInstruction::Label(end_label));
@@ -496,7 +551,11 @@ impl TacProgram {
                 }
                 let src_left = self.parse_expression(*left, tac_instructions);
                 let src_right = self.parse_expression(*right, tac_instructions);
-                let dst = self.new_temp_var();
+                let dst = self.new_temp_var(
+                    expression
+                        .etype
+                        .expect("Expessions is expected to have type!"),
+                );
 
                 let tac_op = match op {
                     BinaryOperator::Addition => TacBinaryOp::Add,
@@ -523,21 +582,24 @@ impl TacProgram {
 
                 dst
             }
-            Expression::Var(name) => {
-                if self.static_vars.contains(&name) {
-                    TacOperand::Static(name)
-                } else {
-                    TacOperand::Var(name)
-                }
-            }
+            Expression::Var(name) => TacOperand::Var {
+                is_static: self.static_vars.contains(&name),
+                name,
+                var_type: expression
+                    .etype
+                    .expect("Expessions is expected to have type!"),
+            },
             Expression::Assignment(left, right) => {
                 let src_right = self.parse_expression(*right, tac_instructions);
 
-                if let Expression::Var(name) = *left {
-                    let dst = if self.static_vars.contains(&name) {
-                        TacOperand::Static(name)
-                    } else {
-                        TacOperand::Var(name)
+                if let Expression::Var(name) = left.expr {
+                    let is_static = self.static_vars.contains(&name);
+                    let dst = TacOperand::Var {
+                        name,
+                        var_type: expression
+                            .etype
+                            .expect("Expessions is expected to have type!"),
+                        is_static,
                     };
                     tac_instructions.push(TacInstruction::Copy {
                         src: src_right.clone(),
@@ -555,7 +617,11 @@ impl TacProgram {
             } => {
                 let e2 = self.new_label();
                 let end_label = self.new_label();
-                let result = self.new_temp_var();
+                let result: TacOperand = self.new_temp_var(
+                    expression
+                        .etype
+                        .expect("Expessions is expected to have type!"),
+                );
 
                 // <condition> ? <e1> : <e2>
                 let src_cond = self.parse_expression(*condition, tac_instructions);
@@ -587,7 +653,11 @@ impl TacProgram {
             }
             Expression::FunctionCall { name, args } => {
                 let mut call_args = Vec::new();
-                let result = self.new_temp_var();
+                let result: TacOperand = self.new_temp_var(
+                    expression
+                        .etype
+                        .expect("Expessions is expected to have type!"),
+                );
                 for arg in args {
                     call_args.push(self.parse_expression(arg, tac_instructions));
                 }
@@ -597,6 +667,40 @@ impl TacProgram {
                     dst: result.clone(),
                 });
                 result
+            }
+            Expression::Cast { target_type, exp } => {
+                let src_type = exp
+                    .etype
+                    .clone()
+                    .expect("Type validation must run before TAC generation");
+                let src = self.parse_expression(*exp, tac_instructions);
+                let dst = self.new_temp_var(
+                    expression
+                        .etype
+                        .expect("Expessions is expected to have type!"),
+                );
+
+                match (src_type, target_type) {
+                    (Type::Int, Type::Long) => {
+                        tac_instructions.push(TacInstruction::SignExtend {
+                            src,
+                            dst: dst.clone(),
+                        });
+                    }
+                    (Type::Long, Type::Int) => {
+                        tac_instructions.push(TacInstruction::Truncate {
+                            src,
+                            dst: dst.clone(),
+                        });
+                    }
+                    _ => {
+                        tac_instructions.push(TacInstruction::Copy {
+                            src,
+                            dst: dst.clone(),
+                        });
+                    }
+                }
+                dst
             }
         }
     }

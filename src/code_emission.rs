@@ -1,8 +1,11 @@
 use core::panic;
 
-use crate::code_gen::{
-    AsmAst, AsmBinaryOp, AsmConditional, AsmFunction, AsmInstruction, AsmOperand, AsmRegister,
-    AsmTopLevel, AsmUnaryOp,
+use crate::{
+    code_gen::{
+        AsmAst, AsmBinaryOp, AsmConditional, AsmFunction, AsmInstruction, AsmOperand, AsmRegister,
+        AsmTopLevel, AsmUnaryOp, AssemblyType,
+    },
+    type_validation::StaticInit,
 };
 
 pub struct CodeEmission {}
@@ -36,20 +39,46 @@ impl CodeEmission {
 
                 instructions.push("\t.data\n".to_string());
                 for item in top_level {
-                    if let AsmTopLevel::StaticVariable { name, init, global } = item {
+                    if let AsmTopLevel::StaticVariable {
+                        name,
+                        init,
+                        global,
+                        alignment,
+                    } = item
+                    {
                         if *global {
                             instructions.push(format!("\t.globl _{}\n", name));
                         }
-                        if *init == 0 {
+
+                        let init_val = match init {
+                            StaticInit::IntInit(val) => *val as i64,
+                            StaticInit::LongInit(val) => *val,
+                        };
+
+                        if init_val == 0 {
                             instructions.push("\t.bss\n".to_string());
-                            instructions.push("\t.balign 4\n".to_string()); // MACOS or Linux directive
+                            instructions.push(format!("\t.balign {}\n", alignment)); // MACOS or Linux directive
                             instructions.push(format!("_{}:\n", name));
-                            instructions.push("\t.zero 4\n".to_string());
+                            match init {
+                                StaticInit::IntInit(_) => {
+                                    instructions.push("\t.zero 4\n".to_string())
+                                }
+                                StaticInit::LongInit(_) => {
+                                    instructions.push("\t.zero 8\n".to_string())
+                                }
+                            }
                         } else {
                             instructions.push("\t.data\n".to_string());
-                            instructions.push("\t.balign 4\n".to_string());
+                            instructions.push(format!("\t.balign {}\n", alignment));
                             instructions.push(format!("_{}:\n", name));
-                            instructions.push(format!("\t.long {}\n", init));
+                            match init {
+                                StaticInit::IntInit(val) => {
+                                    instructions.push(format!("\t.long {}\n", val))
+                                }
+                                StaticInit::LongInit(val) => {
+                                    instructions.push(format!("\t.quad {}\n", val))
+                                }
+                            }
                         }
                     }
                 }
@@ -81,11 +110,18 @@ impl CodeEmission {
                 AsmInstruction::DeallocateStack(offset) => {
                     asm_code.push(format!("\tadd rsp, {}\n", offset.abs()));
                 }
-                AsmInstruction::Mov { src, dst } => {
+                AsmInstruction::Mov { src, dst, size } => {
                     asm_code.push(format!(
                         "\tmov {}, {}\n",
-                        self.asm_operand_to_string(dst),
-                        self.asm_operand_to_string(src)
+                        self.asm_operand_to_string(dst, size),
+                        self.asm_operand_to_string(src, size)
+                    ));
+                }
+                AsmInstruction::Movsx { src, dst } => {
+                    asm_code.push(format!(
+                        "\tmovsxd {}, {}\n",
+                        self.asm_operand_to_string(dst, &AssemblyType::Qword),
+                        self.asm_operand_to_string(src, &AssemblyType::Dword)
                     ));
                 }
                 AsmInstruction::Ret => {
@@ -93,32 +129,41 @@ impl CodeEmission {
                     asm_code.push("\tpop rbp\n".to_string());
                     asm_code.push("\tret\n".to_string());
                 }
-                AsmInstruction::Unary { op, operand } => {
+                AsmInstruction::Unary { op, operand, size } => {
                     asm_code.push(format!(
                         "\t{} {}\n",
                         self.asm_unary_operator_to_string(op),
-                        self.asm_operand_to_string(operand)
+                        self.asm_operand_to_string(operand, size)
                     ));
                 }
-                AsmInstruction::Binary { op, left, right } => {
+                AsmInstruction::Binary {
+                    op,
+                    left,
+                    right,
+                    size,
+                } => {
                     asm_code.push(format!(
                         "\t{} {}, {}\n",
                         self.asm_binary_operator_to_string(op),
-                        self.asm_operand_to_string(left),
-                        self.asm_operand_to_string(right)
+                        self.asm_operand_to_string(left, size),
+                        self.asm_operand_to_string(right, size)
                     ));
                 }
-                AsmInstruction::Idiv(operand) => {
-                    asm_code.push(format!("\tidiv {}\n", self.asm_operand_to_string(operand)));
+                AsmInstruction::Idiv { operand, size } => {
+                    asm_code.push(format!(
+                        "\tidiv {}\n",
+                        self.asm_operand_to_string(operand, size)
+                    ));
                 }
-                AsmInstruction::Cdq => {
-                    asm_code.push("\tcdq\n".to_string());
-                }
-                AsmInstruction::Cmp { left, right } => {
+                AsmInstruction::Cdq { size } => match size {
+                    AssemblyType::Dword => asm_code.push("\tcdq\n".to_string()),
+                    AssemblyType::Qword => asm_code.push("\tcqo\n".to_string()),
+                },
+                AsmInstruction::Cmp { left, right, size } => {
                     asm_code.push(format!(
                         "\tcmp {}, {}\n",
-                        self.asm_operand_to_string(left),
-                        self.asm_operand_to_string(right)
+                        self.asm_operand_to_string(left, size),
+                        self.asm_operand_to_string(right, size)
                     ));
                 }
                 AsmInstruction::Label(label) => {
@@ -152,13 +197,19 @@ impl CodeEmission {
                     AsmOperand::Reg(reg) => {
                         asm_code.push(format!("\tpop {}\n", self.asm_reg_to_string(reg, 8)));
                     }
-                    _ => asm_code.push(format!("\tpop {}\n", self.asm_operand_to_string(operand))),
+                    _ => asm_code.push(format!(
+                        "\tpop {}\n",
+                        self.asm_operand_to_string(operand, &AssemblyType::Qword)
+                    )),
                 },
                 AsmInstruction::Push(operand) => match operand {
                     AsmOperand::Reg(reg) => {
                         asm_code.push(format!("\tpush {}\n", self.asm_reg_to_string(reg, 8)));
                     }
-                    _ => asm_code.push(format!("\tpush {}\n", self.asm_operand_to_string(operand))),
+                    _ => asm_code.push(format!(
+                        "\tpush {}\n",
+                        self.asm_operand_to_string(operand, &AssemblyType::Qword)
+                    )),
                 },
                 AsmInstruction::Call(label) => {
                     asm_code.push(format!("\tcall _{}\n", label));
@@ -167,18 +218,26 @@ impl CodeEmission {
         }
     }
 
-    fn asm_operand_to_string(&mut self, asm_operand: &AsmOperand) -> String {
+    fn asm_operand_to_string(&mut self, asm_operand: &AsmOperand, size: &AssemblyType) -> String {
+        let ptr_size = match size {
+            AssemblyType::Dword => "DWORD PTR",
+            AssemblyType::Qword => "QWORD PTR",
+        };
+        let byte_size = match size {
+            AssemblyType::Dword => 4,
+            AssemblyType::Qword => 8,
+        };
         match asm_operand {
             AsmOperand::Imm(val) => val.to_string(),
-            AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, 4),
+            AsmOperand::Reg(reg) => self.asm_reg_to_string(reg, byte_size),
             AsmOperand::Stack(val) => {
                 if *val < 0 {
-                    format!("DWORD PTR [rbp - {}]", val.abs())
+                    format!("{} [rbp - {}]", ptr_size, val.abs())
                 } else {
-                    format!("DWORD PTR [rbp + {}]", val)
+                    format!("{} [rbp + {}]", ptr_size, val)
                 }
             }
-            AsmOperand::Data(name) => format!("DWORD PTR [rip + _{}]", name),
+            AsmOperand::Data(name) => format!("{} [rip + _{}]", ptr_size, name),
         }
     }
     fn asm_unary_operator_to_string(&mut self, asm_op: &AsmUnaryOp) -> String {
@@ -207,6 +266,7 @@ impl CodeEmission {
                 AsmRegister::R9 => "r9".to_string(),
                 AsmRegister::R10 => "r10".to_string(),
                 AsmRegister::R11 => "r11".to_string(),
+                AsmRegister::RSP => "rsp".to_string(),
             }
         } else if byte_size == 4 {
             match asm_reg {
@@ -219,6 +279,7 @@ impl CodeEmission {
                 AsmRegister::R9 => "r9d".to_string(),
                 AsmRegister::R10 => "r10d".to_string(),
                 AsmRegister::R11 => "r11d".to_string(),
+                AsmRegister::RSP => "esp".to_string(),
             }
         } else {
             match asm_reg {
@@ -231,6 +292,7 @@ impl CodeEmission {
                 AsmRegister::R9 => "r9b".to_string(),
                 AsmRegister::R10 => "r10b".to_string(),
                 AsmRegister::R11 => "r11b".to_string(),
+                AsmRegister::RSP => "spl".to_string(),
             }
         }
     }

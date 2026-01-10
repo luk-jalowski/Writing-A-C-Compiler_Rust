@@ -46,6 +46,7 @@ impl Parser {
     fn parse_block_item(&mut self) -> BlockItem {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordInt)
+            | Some(TokenType::KeywordLong)
             | Some(TokenType::KeywordStatic)
             | Some(TokenType::KeywordExtern) => BlockItem::Declaration(self.parse_declaration()),
             _ => BlockItem::Statement(self.parse_statement()),
@@ -54,7 +55,7 @@ impl Parser {
 
     fn parse_declaration(&mut self) -> Declaration {
         // Type is always int32 for now, ignore for now
-        let (_decl_type, storage_class) = self.parse_type_and_storage_class();
+        let (decl_type, storage_class) = self.parse_type_and_storage_class();
 
         let name = match self.consume_token() {
             Some(token) => match token.token_type {
@@ -75,6 +76,7 @@ impl Parser {
                     name,
                     init: Some(expr),
                     storage_class,
+                    var_type: decl_type,
                 })
             }
             Some(TokenType::Semicolon) => {
@@ -83,12 +85,18 @@ impl Parser {
                     name,
                     init: None,
                     storage_class,
+                    var_type: decl_type,
                 })
             }
             Some(TokenType::OpenParen) => {
                 self.consume_token();
-                let params = self.parse_param_list();
+                let (params, param_types) = self.parse_param_list();
                 self.expect_token(TokenType::CloseParen);
+
+                let func_type = Type::FuncType {
+                    params: param_types,
+                    ret: Box::new(decl_type),
+                };
 
                 if let Some(TokenType::OpenBrace) = self.peek_token().map(|t| t.token_type) {
                     let body = self.parse_block();
@@ -97,6 +105,7 @@ impl Parser {
                         params,
                         body: Some(body),
                         storage_class,
+                        func_type,
                     })
                 } else {
                     self.expect_token(TokenType::Semicolon);
@@ -105,6 +114,7 @@ impl Parser {
                         params,
                         body: None,
                         storage_class,
+                        func_type,
                     })
                 }
             }
@@ -115,14 +125,18 @@ impl Parser {
         }
     }
 
-    fn parse_type_and_storage_class(&mut self) -> (Types, Option<StorageClass>) {
-        let mut types = Vec::<Types>::new();
+    fn parse_type_and_storage_class(&mut self) -> (Type, Option<StorageClass>) {
+        let mut types = Vec::<Type>::new();
         let mut storage_classes = Vec::<StorageClass>::new();
         while let Some(token) = self.peek_token() {
             match token.token_type {
                 TokenType::KeywordInt => {
                     self.consume_token();
-                    types.push(Types::Integer32);
+                    types.push(Type::Int);
+                }
+                TokenType::KeywordLong => {
+                    self.consume_token();
+                    types.push(Type::Long);
                 }
                 TokenType::KeywordStatic => {
                     self.consume_token();
@@ -138,14 +152,8 @@ impl Parser {
             }
         }
 
-        // Declaration must have no more than one type
-        if types.len() != 1 {
-            panic!(
-                "Incorrect number of types for declaration {}: {:?}",
-                types.len(),
-                types
-            );
-        }
+        let result_type = self.parse_type(types);
+
         // And at most 1 storage class
         if storage_classes.len() > 1 {
             panic!(
@@ -161,49 +169,55 @@ impl Parser {
             None
         };
 
-        (types[0], storage_class)
+        (result_type, storage_class)
     }
 
-    fn parse_param_list(&mut self) -> Vec<String> {
-        match self.peek_token().map(|t| t.token_type) {
-            Some(TokenType::KeywordVoid) => {
-                self.consume_token();
+    fn parse_type(&mut self, types: Vec<Type>) -> Type {
+        match types.as_slice() {
+            [Type::Int] => Type::Int,
+            [Type::Long] | [Type::Int, Type::Long] | [Type::Long, Type::Int] => Type::Long,
+            _ => panic!("Invalid type specifier {:?}", types),
+        }
+    }
 
-                Vec::new()
+    fn parse_param_list(&mut self) -> (Vec<String>, Vec<Type>) {
+        let next_token = self.peek_token().map(|t| t.token_type);
+
+        if next_token == Some(TokenType::CloseParen) {
+            return (Vec::new(), Vec::new());
+        }
+
+        if next_token == Some(TokenType::KeywordVoid) {
+            self.consume_token();
+            if self.peek_token().map(|t| t.token_type) == Some(TokenType::CloseParen) {
+                return (Vec::new(), Vec::new());
             }
-            Some(TokenType::KeywordInt) => {
-                self.consume_token();
-                let mut params = Vec::new();
+            panic!("parse_param_list 'void' must be the only parameter");
+        }
 
-                if let Some(TokenType::Identifier(name)) =
-                    self.consume_token().map(|t| t.token_type)
-                {
+        let mut params = Vec::new();
+        let mut param_types = Vec::new();
+        loop {
+            let (ptype, sc) = self.parse_type_and_storage_class();
+            if sc.is_some() {
+                panic!("parse_param_list Storage class not allowed in parameter list");
+            }
+
+            match self.consume_token().map(|t| t.token_type) {
+                Some(TokenType::Identifier(name)) => {
                     params.push(name);
-                } else {
-                    panic!("parse_param_list Expected identifier in param list");
+                    param_types.push(ptype);
                 }
-
-                while let Some(TokenType::Comma) = self.peek_token().map(|t| t.token_type) {
-                    self.consume_token();
-                    self.expect_token(TokenType::KeywordInt);
-                    if let Some(TokenType::Identifier(name)) =
-                        self.consume_token().map(|t| t.token_type)
-                    {
-                        params.push(name);
-                    } else {
-                        panic!("parse_param_list Expected identifier in param list");
-                    }
-                }
-
-                params
+                _ => panic!("parse_param_list Expected identifier"),
             }
-            _ => {
-                panic!(
-                    " parse_param_list Unexpected keyword found {:?}",
-                    self.peek_token()
-                )
+
+            if let Some(TokenType::Comma) = self.peek_token().map(|t| t.token_type) {
+                self.consume_token();
+            } else {
+                break;
             }
         }
+        (params, param_types)
     }
 
     fn parse_statement(&mut self) -> Statement {
@@ -331,6 +345,7 @@ impl Parser {
 
     fn parse_for_init(&mut self) -> ForInit {
         if let Some(TokenType::KeywordInt)
+        | Some(TokenType::KeywordLong)
         | Some(TokenType::KeywordStatic)
         | Some(TokenType::KeywordExtern) = self.peek_token().map(|t| t.token_type)
         {
@@ -352,23 +367,69 @@ impl Parser {
         }
     }
 
-    fn parse_factor(&mut self) -> Expression {
+    fn parse_factor(&mut self) -> TypedExpression {
         match self.consume_token() {
             Some(token) => match token.token_type {
-                TokenType::Integer(val) => Expression::Constant(val),
-                TokenType::Hyphen => {
-                    Expression::UnaryExpr(UnaryOperator::Negate, Box::new(self.parse_factor()))
-                }
-                TokenType::Tilde => {
-                    Expression::UnaryExpr(UnaryOperator::Complement, Box::new(self.parse_factor()))
-                }
-                TokenType::Not => {
-                    Expression::UnaryExpr(UnaryOperator::Not, Box::new(self.parse_factor()))
-                }
+                TokenType::Integer32(val) => TypedExpression {
+                    expr: Expression::Constant(Const::ConstInt(val)),
+                    etype: None,
+                },
+                TokenType::Integer64(val) => TypedExpression {
+                    expr: Expression::Constant(Const::ConstLong(val)),
+                    etype: None,
+                },
+                TokenType::Hyphen => TypedExpression {
+                    expr: Expression::UnaryExpr(
+                        UnaryOperator::Negate,
+                        Box::new(self.parse_factor()),
+                    ),
+                    etype: None,
+                },
+                TokenType::Tilde => TypedExpression {
+                    expr: Expression::UnaryExpr(
+                        UnaryOperator::Complement,
+                        Box::new(self.parse_factor()),
+                    ),
+                    etype: None,
+                },
+                TokenType::Not => TypedExpression {
+                    expr: Expression::UnaryExpr(UnaryOperator::Not, Box::new(self.parse_factor())),
+                    etype: None,
+                },
                 TokenType::OpenParen => {
-                    let inner_expr = self.parse_expression(0);
-                    self.expect_token(TokenType::CloseParen);
-                    inner_expr
+                    let next_token = self.peek_token().map(|t| t.token_type);
+                    if next_token == Some(TokenType::KeywordInt)
+                        || next_token == Some(TokenType::KeywordLong)
+                    {
+                        let mut types = Vec::new();
+                        while let Some(token) = self.peek_token() {
+                            match token.token_type {
+                                TokenType::KeywordInt => {
+                                    self.consume_token();
+                                    types.push(Type::Int);
+                                }
+                                TokenType::KeywordLong => {
+                                    self.consume_token();
+                                    types.push(Type::Long);
+                                }
+                                _ => break,
+                            }
+                        }
+                        let target_type = self.parse_type(types);
+                        self.expect_token(TokenType::CloseParen);
+                        let exp = self.parse_factor();
+                        TypedExpression {
+                            expr: Expression::Cast {
+                                target_type,
+                                exp: Box::new(exp),
+                            },
+                            etype: None,
+                        }
+                    } else {
+                        let inner_expr = self.parse_expression(0);
+                        self.expect_token(TokenType::CloseParen);
+                        inner_expr
+                    }
                 }
                 TokenType::Identifier(name) => {
                     if let Some(TokenType::OpenParen) = self.peek_token().map(|t| t.token_type) {
@@ -376,9 +437,15 @@ impl Parser {
 
                         let args = self.parse_argument_list();
                         self.expect_token(TokenType::CloseParen);
-                        Expression::FunctionCall { name, args }
+                        TypedExpression {
+                            expr: Expression::FunctionCall { name, args },
+                            etype: None,
+                        }
                     } else {
-                        Expression::Var(name)
+                        TypedExpression {
+                            expr: Expression::Var(name),
+                            etype: None,
+                        }
                     }
                 }
 
@@ -388,7 +455,7 @@ impl Parser {
         }
     }
 
-    fn parse_argument_list(&mut self) -> Vec<Expression> {
+    fn parse_argument_list(&mut self) -> Vec<TypedExpression> {
         let mut args = Vec::new();
 
         if let Some(TokenType::CloseParen) = self.peek_token().map(|t| t.token_type) {
@@ -405,7 +472,7 @@ impl Parser {
         args
     }
 
-    fn parse_expression(&mut self, min_prec: u32) -> Expression {
+    fn parse_expression(&mut self, min_prec: u32) -> TypedExpression {
         let mut left = self.parse_factor();
         while let Some(next_token) = self.peek_token() {
             let precedence: u32 = match next_token.token_type {
@@ -428,7 +495,10 @@ impl Parser {
             self.consume_token();
             if next_token.token_type == TokenType::Assignment {
                 let right = self.parse_expression(precedence);
-                left = Expression::Assignment(Box::new(left), Box::new(right));
+                left = TypedExpression {
+                    expr: Expression::Assignment(Box::new(left), Box::new(right)),
+                    etype: None,
+                };
             } else if next_token.token_type == TokenType::QuestionMark {
                 // Parse middle expression of ? <exp> : <exp> until :
                 let middle = self.parse_expression(0);
@@ -438,10 +508,13 @@ impl Parser {
                 let right = self.parse_expression(precedence);
 
                 // left = Expression::Assignment(Box::new(left), Box::new(right));
-                left = Expression::Conditional {
-                    condition: Box::new(left),
-                    exp1: Box::new(middle),
-                    exp2: Box::new(right),
+                left = TypedExpression {
+                    expr: Expression::Conditional {
+                        condition: Box::new(left),
+                        exp1: Box::new(middle),
+                        exp2: Box::new(right),
+                    },
+                    etype: None,
                 };
             } else {
                 let op: BinaryOperator = match next_token.token_type {
@@ -462,7 +535,10 @@ impl Parser {
                 };
 
                 let right = self.parse_expression(precedence + 1);
-                left = Expression::BinaryExp(Box::new(left), op, Box::new(right));
+                left = TypedExpression {
+                    expr: Expression::BinaryExp(Box::new(left), op, Box::new(right)),
+                    etype: None,
+                };
             }
         }
 

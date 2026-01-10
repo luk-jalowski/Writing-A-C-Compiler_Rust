@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    AST, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, StorageClass, VarDecl,
+    AST, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, StorageClass,
+    TypedExpression, VarDecl,
 };
 
 struct MapEntry {
@@ -68,12 +69,13 @@ impl SemanticValidation {
             .last()
             .expect("Scope is empty")
             .get(&function.name)
-            && entry.tmp_name != function.name {
-                panic!(
-                    "<resolve_function_declaration> Duplicate function name found: {}",
-                    function.name
-                );
-            }
+            && entry.tmp_name != function.name
+        {
+            panic!(
+                "<resolve_function_declaration> Duplicate function name found: {}",
+                function.name
+            );
+        }
         self.scopes.last_mut().expect("Scope is empty").insert(
             function.name.clone(),
             MapEntry {
@@ -164,9 +166,10 @@ impl SemanticValidation {
         } else {
             let is_extern = matches!(var_decl.storage_class, Some(StorageClass::Extern));
             if let Some(prev_entry) = self.scopes.last().unwrap().get(&var_decl.name)
-                && !(prev_entry.has_linkage && is_extern) {
-                    panic!("Conflicting local declarations for {}", var_decl.name);
-                }
+                && !(prev_entry.has_linkage && is_extern)
+            {
+                panic!("Conflicting local declarations for {}", var_decl.name);
+            }
             if is_extern {
                 self.scopes.last_mut().unwrap().insert(
                     var_decl.name.clone(),
@@ -193,8 +196,8 @@ impl SemanticValidation {
         }
     }
 
-    fn resolve_expression(&mut self, expr: &mut Expression) {
-        match expr {
+    fn resolve_expression(&mut self, expr: &mut TypedExpression) {
+        match &mut expr.expr {
             Expression::Var(name) => {
                 // We need rev cause we need last occurence of given name (inner scope)
                 match self.scopes.iter().rev().find_map(|scope| scope.get(name)) {
@@ -210,7 +213,7 @@ impl SemanticValidation {
                 };
             }
             Expression::Assignment(left, right) => {
-                if !matches!(**left, Expression::Var(_)) {
+                if !matches!(left.expr, Expression::Var(_)) {
                     panic!("Invalid lvalue");
                 }
                 self.resolve_expression(left);
@@ -238,6 +241,9 @@ impl SemanticValidation {
                 for arg in args {
                     self.resolve_expression(arg);
                 }
+            }
+            Expression::Cast { target_type, exp } => {
+                self.resolve_expression(exp);
             }
         }
     }

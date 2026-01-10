@@ -2,20 +2,15 @@ use core::panic;
 use std::collections::HashMap;
 
 use crate::ast::{
-    AST, Block, BlockItem, Declaration, Expression, ForInit, FunDecl, Statement, StorageClass,
-    VarDecl,
+    AST, BinaryOperator, Block, BlockItem, Const, Declaration, Expression, ForInit, FunDecl,
+    Statement, StorageClass, Type, TypedExpression, UnaryOperator, VarDecl,
 };
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Type {
-    Int,
-    FunType { param_count: u32 },
-}
 
 #[derive(Debug)]
 pub struct TypeValidation {
     pub symbols: HashMap<String, (Type, IdentifierAttribs)>,
     current_scope_is_global: bool,
+    current_func_ret_type: Option<Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,8 +22,14 @@ pub enum IdentifierAttribs {
 #[derive(Debug, Clone)]
 pub enum InitialValue {
     Tentative,
-    Initial { value: u32 },
+    Initial(StaticInit),
     NoInitializer,
+}
+
+#[derive(Debug, Clone)]
+pub enum StaticInit {
+    IntInit(i32),
+    LongInit(i64),
 }
 
 impl Default for TypeValidation {
@@ -42,6 +43,7 @@ impl TypeValidation {
         TypeValidation {
             symbols: HashMap::new(),
             current_scope_is_global: true,
+            current_func_ret_type: None,
         }
     }
 
@@ -68,8 +70,8 @@ impl TypeValidation {
         let mut is_global = function.storage_class != Some(StorageClass::Static);
 
         if let Some((prev_decl, prev_attr)) = self.symbols.get(&function.name) {
-            let param_count = match prev_decl {
-                Type::FunType { param_count } => *param_count,
+            let (prev_params, _) = match prev_decl {
+                Type::FuncType { params, ret } => (params, ret),
                 _ => {
                     panic!(
                         "typecheck_function_declaration Expected function type {:?}",
@@ -79,12 +81,18 @@ impl TypeValidation {
             };
             match prev_attr {
                 IdentifierAttribs::FunAttr { defined, global } => {
-                    if param_count != function.params.len() as u32 {
+                    if prev_params.len() != function.params.len() {
                         panic!(
                             "typecheck_function_declaration Found duplicate function {} with different argument number {}, previous count {}",
                             function.name,
                             function.params.len(),
-                            param_count
+                            prev_params.len()
+                        );
+                    }
+                    if prev_decl != &function.func_type {
+                        panic!(
+                            "typecheck_function_declaration Found duplicate function {} with different signature",
+                            function.name
                         );
                     }
                     if *defined && has_body {
@@ -107,7 +115,10 @@ impl TypeValidation {
                     is_global = *global;
                 }
                 _ => {
-                    panic!("Expected function attributes {:?}", prev_attr);
+                    panic!(
+                        "typecheck_function_declaration Expected function attributes {:?}",
+                        prev_attr
+                    );
                 }
             };
         }
@@ -115,9 +126,7 @@ impl TypeValidation {
         self.symbols.insert(
             function.name.clone(),
             (
-                Type::FunType {
-                    param_count: function.params.len() as u32,
-                },
+                function.func_type.clone(),
                 IdentifierAttribs::FunAttr {
                     defined: is_defined,
                     global: is_global,
@@ -126,11 +135,19 @@ impl TypeValidation {
         );
 
         if has_body {
-            for param in &mut function.params {
+            let param_types = match &function.func_type {
+                Type::FuncType { params, .. } => params,
+                _ => panic!(
+                    "typecheck_function_declaration Function has non-function type {:?}",
+                    function.func_type
+                ),
+            };
+
+            for (param, param_type) in function.params.iter_mut().zip(param_types.iter()) {
                 self.symbols.insert(
                     param.clone(),
                     (
-                        Type::Int,
+                        param_type.clone(),
                         IdentifierAttribs::FunAttr {
                             defined: true,
                             global: is_global,
@@ -139,9 +156,13 @@ impl TypeValidation {
                 );
             }
             if let Some(block) = &mut function.body {
+                if let Type::FuncType { ret, .. } = &function.func_type {
+                    self.current_func_ret_type = Some(*ret.clone());
+                }
                 self.current_scope_is_global = false;
                 self.typecheck_block(block);
                 self.current_scope_is_global = true;
+                self.current_func_ret_type = None;
             }
         }
     }
@@ -154,9 +175,18 @@ impl TypeValidation {
         // Determine initialization status
         let mut init_val = if let Some(init) = &var_decl.init {
             if is_global_scope || is_static {
-                match init {
-                    Expression::Constant(val) => InitialValue::Initial { value: *val as u32 },
-                    _ => InitialValue::Initial { value: 0 },
+                match &init.expr {
+                    Expression::Constant(val) => match val {
+                        Const::ConstInt(i) => match var_decl.var_type {
+                            Type::Long => InitialValue::Initial(StaticInit::LongInit(*i as i64)),
+                            _ => InitialValue::Initial(StaticInit::IntInit(*i)),
+                        },
+                        Const::ConstLong(l) => match var_decl.var_type {
+                            Type::Int => InitialValue::Initial(StaticInit::IntInit(*l as i32)),
+                            _ => InitialValue::Initial(StaticInit::LongInit(*l)),
+                        },
+                    },
+                    _ => InitialValue::Initial(StaticInit::IntInit(0)),
                 }
             } else {
                 InitialValue::NoInitializer
@@ -166,7 +196,7 @@ impl TypeValidation {
         } else if is_global_scope {
             InitialValue::Tentative
         } else if is_static {
-            InitialValue::Initial { value: 0 }
+            InitialValue::Initial(StaticInit::IntInit(0))
         } else {
             InitialValue::NoInitializer
         };
@@ -181,7 +211,7 @@ impl TypeValidation {
 
         // Check for conflicts with existing symbols
         if let Some((prev_type, prev_attr)) = self.symbols.get(&var_decl.name) {
-            if *prev_type != Type::Int {
+            if *prev_type != var_decl.var_type {
                 panic!(
                     "Variable {} redeclared as different kind of symbol",
                     var_decl.name
@@ -197,41 +227,41 @@ impl TypeValidation {
                 if !prev_has_external_linkage {
                     has_external_linkage = false;
                 }
-            } else if is_global_scope
-                && prev_has_external_linkage != has_external_linkage {
-                    panic!("Conflicting linkage for {}", var_decl.name);
-                }
+            } else if is_global_scope && prev_has_external_linkage != has_external_linkage {
+                panic!("Conflicting linkage for {}", var_decl.name);
+            }
 
             if is_global_scope
                 && let IdentifierAttribs::StaticAttr {
                     init: prev_init, ..
                 } = prev_attr
+            {
+                if matches!(init_val, InitialValue::Initial { .. })
+                    && matches!(prev_init, InitialValue::Initial { .. })
                 {
-                    if matches!(init_val, InitialValue::Initial { .. })
-                        && matches!(prev_init, InitialValue::Initial { .. })
-                    {
-                        panic!("Redefinition of global variable {}", var_decl.name);
-                    }
-
-                    if matches!(prev_init, InitialValue::Initial { .. })
-                        || matches!(init_val, InitialValue::NoInitializer)
-                    {
-                        return;
-                    }
+                    panic!("Redefinition of global variable {}", var_decl.name);
                 }
+
+                if matches!(prev_init, InitialValue::Initial { .. })
+                    || matches!(init_val, InitialValue::NoInitializer)
+                {
+                    return;
+                }
+            }
 
             if let IdentifierAttribs::StaticAttr {
                 init: prev_init, ..
             } = prev_attr
-                && matches!(init_val, InitialValue::NoInitializer) {
-                    init_val = prev_init.clone();
-                }
+                && matches!(init_val, InitialValue::NoInitializer)
+            {
+                init_val = prev_init.clone();
+            }
         }
 
         self.symbols.insert(
             var_decl.name.clone(),
             (
-                Type::Int,
+                var_decl.var_type.clone(),
                 IdentifierAttribs::StaticAttr {
                     init: init_val,
                     global: has_external_linkage,
@@ -244,10 +274,23 @@ impl TypeValidation {
                 panic!("Extern variable cannot have an initializer in block scope");
             }
             self.typecheck_expression(init);
-            if (is_global_scope || is_static)
-                && !self.is_constant_expression(init) {
-                    panic!("Initializer element is not constant");
-                }
+            let init_type = init.etype.as_ref().unwrap();
+            if init_type != &var_decl.var_type {
+                let old_expr =
+                    std::mem::replace(&mut init.expr, Expression::Constant(Const::ConstInt(0)));
+                let old_typed_expr = TypedExpression {
+                    expr: old_expr,
+                    etype: Some(init_type.clone()),
+                };
+                init.expr = Expression::Cast {
+                    target_type: var_decl.var_type.clone(),
+                    exp: Box::new(old_typed_expr),
+                };
+                init.etype = Some(var_decl.var_type.clone());
+            }
+            if (is_global_scope || is_static) && !self.is_constant_expression(init) {
+                panic!("Initializer element is not constant");
+            }
         };
 
         if is_static && !is_global_scope {
@@ -255,8 +298,8 @@ impl TypeValidation {
         }
     }
 
-    fn is_constant_expression(&self, expr: &Expression) -> bool {
-        match expr {
+    fn is_constant_expression(&self, expr: &TypedExpression) -> bool {
+        match &expr.expr {
             Expression::Constant(_) => true,
             Expression::UnaryExpr(_, inner) => self.is_constant_expression(inner),
             Expression::BinaryExp(left, _, right) => {
@@ -271,43 +314,153 @@ impl TypeValidation {
                     && self.is_constant_expression(exp1)
                     && self.is_constant_expression(exp2)
             }
+            Expression::Cast { exp, .. } => self.is_constant_expression(exp),
             _ => false,
         }
     }
 
-    fn typecheck_expression(&mut self, expr: &mut Expression) {
-        match expr {
+    fn typecheck_expression(&mut self, typed_expr: &mut TypedExpression) {
+        match &mut typed_expr.expr {
+            Expression::Constant(c) => {
+                typed_expr.etype = Some(match c {
+                    Const::ConstInt(_) => Type::Int,
+                    Const::ConstLong(_) => Type::Long,
+                });
+            }
             Expression::FunctionCall { name, args } => {
-                let (func_type, _) = self.symbols.get(name).unwrap();
-                match *func_type {
-                    Type::Int => {
-                        panic!("typecheck_expression Variable used as function name!");
-                    }
-                    Type::FunType { param_count } => {
-                        if param_count != args.len() as u32 {
+                let (func_type, _) = self.symbols.get(name).unwrap().clone();
+                match func_type {
+                    Type::FuncType { params, ret } => {
+                        if params.len() != args.len() {
                             panic!("typecheck_expression Incorrect argument count!");
                         }
 
-                        for arg in args {
+                        for (arg, param_type) in args.iter_mut().zip(params.iter()) {
                             self.typecheck_expression(arg);
+                            let arg_type = arg.etype.as_ref().unwrap();
+                            if arg_type != param_type {
+                                let old_expr = std::mem::replace(
+                                    &mut arg.expr,
+                                    Expression::Constant(Const::ConstInt(0)),
+                                );
+                                let old_typed_expr = TypedExpression {
+                                    expr: old_expr,
+                                    etype: Some(arg_type.clone()),
+                                };
+                                arg.expr = Expression::Cast {
+                                    target_type: param_type.clone(),
+                                    exp: Box::new(old_typed_expr),
+                                };
+                                arg.etype = Some(param_type.clone());
+                            }
                         }
+                        typed_expr.etype = Some(*ret);
                     }
+                    _ => panic!("typecheck_expression Variable used as function name!"),
                 }
             }
             Expression::Var(name) => {
-                let (func_type, _) = self.symbols.get(name).unwrap();
-                if *func_type != Type::Int {
-                    panic!("typecheck_expression Function name used as variable!");
+                let (var_type, _) = self.symbols.get(name).unwrap();
+
+                if matches!(var_type, Type::FuncType { .. }) {
+                    panic!(
+                        "typecheck_expression Function name used as variable! {}",
+                        name
+                    );
+                }
+                typed_expr.etype = Some(var_type.clone());
+            }
+            Expression::UnaryExpr(op, expr) => {
+                self.typecheck_expression(expr);
+                let inner_type = expr.etype.as_ref().unwrap();
+                match op {
+                    UnaryOperator::Not => typed_expr.etype = Some(Type::Int),
+                    _ => typed_expr.etype = Some(inner_type.clone()),
                 }
             }
-            Expression::UnaryExpr(_, expr) => self.typecheck_expression(expr),
-            Expression::BinaryExp(left, _, right) => {
+            Expression::BinaryExp(left, op, right) => {
                 self.typecheck_expression(left);
                 self.typecheck_expression(right);
+                let left_type = left.etype.as_ref().unwrap();
+                let right_type = right.etype.as_ref().unwrap();
+
+                if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+                    typed_expr.etype = Some(Type::Int);
+                    return;
+                }
+
+                let common_type =
+                    if matches!(left_type, Type::Long) || matches!(right_type, Type::Long) {
+                        Type::Long
+                    } else {
+                        Type::Int
+                    };
+
+                if *left_type != common_type {
+                    let old_expr =
+                        std::mem::replace(&mut left.expr, Expression::Constant(Const::ConstInt(0)));
+                    let old_typed_expr = TypedExpression {
+                        expr: old_expr,
+                        etype: Some(left_type.clone()),
+                    };
+                    left.expr = Expression::Cast {
+                        target_type: common_type.clone(),
+                        exp: Box::new(old_typed_expr),
+                    };
+                    left.etype = Some(common_type.clone());
+                }
+
+                if *right_type != common_type {
+                    let old_expr = std::mem::replace(
+                        &mut right.expr,
+                        Expression::Constant(Const::ConstInt(0)),
+                    );
+                    let old_typed_expr = TypedExpression {
+                        expr: old_expr,
+                        etype: Some(right_type.clone()),
+                    };
+                    right.expr = Expression::Cast {
+                        target_type: common_type.clone(),
+                        exp: Box::new(old_typed_expr),
+                    };
+                    right.etype = Some(common_type.clone());
+                }
+
+                match op {
+                    BinaryOperator::EqualTo
+                    | BinaryOperator::NotEqualTo
+                    | BinaryOperator::LessThan
+                    | BinaryOperator::LessOrEqual
+                    | BinaryOperator::GreaterThan
+                    | BinaryOperator::GreaterOrEqual => {
+                        typed_expr.etype = Some(Type::Int);
+                    }
+                    _ => {
+                        typed_expr.etype = Some(common_type);
+                    }
+                }
             }
             Expression::Assignment(left, right) => {
                 self.typecheck_expression(left);
                 self.typecheck_expression(right);
+                let left_type = left.etype.as_ref().unwrap();
+                let right_type = right.etype.as_ref().unwrap();
+                if left_type != right_type {
+                    let old_expr = std::mem::replace(
+                        &mut right.expr,
+                        Expression::Constant(Const::ConstInt(0)),
+                    );
+                    let old_typed_expr = TypedExpression {
+                        expr: old_expr,
+                        etype: Some(right_type.clone()),
+                    };
+                    right.expr = Expression::Cast {
+                        target_type: left_type.clone(),
+                        exp: Box::new(old_typed_expr),
+                    };
+                    right.etype = Some(left_type.clone());
+                }
+                typed_expr.etype = left.etype.clone();
             }
             Expression::Conditional {
                 condition,
@@ -317,8 +470,48 @@ impl TypeValidation {
                 self.typecheck_expression(condition);
                 self.typecheck_expression(exp1);
                 self.typecheck_expression(exp2);
+                let t1 = exp1.etype.as_ref().unwrap();
+                let t2 = exp2.etype.as_ref().unwrap();
+
+                let common_type = if matches!(t1, Type::Long) || matches!(t2, Type::Long) {
+                    Type::Long
+                } else {
+                    Type::Int
+                };
+
+                if *t1 != common_type {
+                    let old_expr =
+                        std::mem::replace(&mut exp1.expr, Expression::Constant(Const::ConstInt(0)));
+                    let old_typed_expr = TypedExpression {
+                        expr: old_expr,
+                        etype: Some(t1.clone()),
+                    };
+                    exp1.expr = Expression::Cast {
+                        target_type: common_type.clone(),
+                        exp: Box::new(old_typed_expr),
+                    };
+                    exp1.etype = Some(common_type.clone());
+                }
+
+                if *t2 != common_type {
+                    let old_expr =
+                        std::mem::replace(&mut exp2.expr, Expression::Constant(Const::ConstInt(0)));
+                    let old_typed_expr = TypedExpression {
+                        expr: old_expr,
+                        etype: Some(t2.clone()),
+                    };
+                    exp2.expr = Expression::Cast {
+                        target_type: common_type.clone(),
+                        exp: Box::new(old_typed_expr),
+                    };
+                    exp2.etype = Some(common_type.clone());
+                }
+                typed_expr.etype = Some(common_type);
             }
-            _ => {}
+            Expression::Cast { target_type, exp } => {
+                self.typecheck_expression(exp);
+                typed_expr.etype = Some(target_type.clone());
+            }
         }
     }
 
@@ -337,7 +530,27 @@ impl TypeValidation {
 
     fn typecheck_statement(&mut self, stmt: &mut Statement) {
         match stmt {
-            Statement::Return(expr) => self.typecheck_expression(expr),
+            Statement::Return(expr) => {
+                self.typecheck_expression(expr);
+                if let Some(ret_type) = &self.current_func_ret_type {
+                    let expr_type = expr.etype.as_ref().unwrap();
+                    if expr_type != ret_type {
+                        let old_expr = std::mem::replace(
+                            &mut expr.expr,
+                            Expression::Constant(Const::ConstInt(0)),
+                        );
+                        let old_typed_expr = TypedExpression {
+                            expr: old_expr,
+                            etype: Some(expr_type.clone()),
+                        };
+                        expr.expr = Expression::Cast {
+                            target_type: ret_type.clone(),
+                            exp: Box::new(old_typed_expr),
+                        };
+                        expr.etype = Some(ret_type.clone());
+                    }
+                }
+            }
             Statement::Expression(expr) => self.typecheck_expression(expr),
             Statement::If {
                 exp,

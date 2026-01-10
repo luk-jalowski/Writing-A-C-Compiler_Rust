@@ -9,13 +9,15 @@ pub struct FunDecl {
     pub params: Vec<String>,
     pub body: Option<Block>,
     pub storage_class: Option<StorageClass>,
+    pub func_type: Type,
 }
 
 #[derive(Debug)]
 pub struct VarDecl {
     pub name: String,
-    pub init: Option<Expression>,
+    pub init: Option<TypedExpression>,
     pub storage_class: Option<StorageClass>,
+    pub var_type: Type,
 }
 
 #[derive(Debug)]
@@ -37,10 +39,10 @@ pub enum BlockItem {
 
 #[derive(Debug)]
 pub enum Statement {
-    Return(Expression),
-    Expression(Expression),
+    Return(TypedExpression),
+    Expression(TypedExpression),
     If {
-        exp: Expression,
+        exp: TypedExpression,
         then: Box<Statement>,
         else_statement: Option<Box<Statement>>,
     },
@@ -52,19 +54,19 @@ pub enum Statement {
         label: String,
     },
     While {
-        condition: Expression,
+        condition: TypedExpression,
         body: Box<Statement>,
         label: String,
     },
     DoWhile {
         body: Box<Statement>,
-        condition: Expression,
+        condition: TypedExpression,
         label: String,
     },
     For {
         init: ForInit,
-        condition: Option<Box<Expression>>,
-        post: Option<Box<Expression>>,
+        condition: Option<Box<TypedExpression>>,
+        post: Option<Box<TypedExpression>>,
         body: Box<Statement>,
         label: String,
     },
@@ -74,7 +76,7 @@ pub enum Statement {
 #[derive(Debug)]
 pub enum ForInit {
     InitDeclaration(VarDecl),
-    InitExpression(Option<Box<Expression>>),
+    InitExpression(Option<Box<TypedExpression>>),
 }
 
 #[derive(Debug)]
@@ -84,20 +86,30 @@ pub enum Declaration {
 }
 
 #[derive(Debug)]
+pub struct TypedExpression {
+    pub expr: Expression,
+    pub etype: Option<Type>,
+}
+
+#[derive(Debug)]
 pub enum Expression {
-    Constant(i32),
+    Constant(Const),
     Var(String),
-    UnaryExpr(UnaryOperator, Box<Expression>),
-    BinaryExp(Box<Expression>, BinaryOperator, Box<Expression>),
-    Assignment(Box<Expression>, Box<Expression>),
+    UnaryExpr(UnaryOperator, Box<TypedExpression>),
+    BinaryExp(Box<TypedExpression>, BinaryOperator, Box<TypedExpression>),
+    Assignment(Box<TypedExpression>, Box<TypedExpression>),
     Conditional {
-        condition: Box<Expression>,
-        exp1: Box<Expression>,
-        exp2: Box<Expression>,
+        condition: Box<TypedExpression>,
+        exp1: Box<TypedExpression>,
+        exp2: Box<TypedExpression>,
     },
     FunctionCall {
         name: String,
-        args: Vec<Expression>,
+        args: Vec<TypedExpression>,
+    },
+    Cast {
+        target_type: Type,
+        exp: Box<TypedExpression>,
     },
 }
 
@@ -128,7 +140,15 @@ pub enum BinaryOperator {
     Colon,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Int,  // 32b
+    Long, // 64 bit
+    FuncType { params: Vec<Type>, ret: Box<Type> },
+}
+
 #[derive(Debug, Clone, Copy)]
-pub enum Types {
-    Integer32,
+pub enum Const {
+    ConstInt(i32),
+    ConstLong(i64),
 }

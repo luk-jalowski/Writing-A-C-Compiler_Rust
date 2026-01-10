@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+use crate::ast::{Const, Type};
 use crate::tac::{
     TacAst, TacBinaryOp, TacFunction, TacInstruction, TacOperand, TacTopLevel, TacUnaryOp,
 };
+use crate::type_validation::StaticInit;
 
 #[derive(Debug)]
 pub enum AsmAst {
@@ -14,8 +16,9 @@ pub enum AsmTopLevel {
     Function(AsmFunction),
     StaticVariable {
         name: String,
-        init: i32,
+        init: StaticInit,
         global: bool,
+        alignment: u32,
     },
 }
 
@@ -31,22 +34,35 @@ pub enum AsmInstruction {
     Mov {
         src: AsmOperand,
         dst: AsmOperand,
+        size: AssemblyType,
+    },
+    Movsx {
+        src: AsmOperand,
+        dst: AsmOperand,
     },
     Unary {
         op: AsmUnaryOp,
         operand: AsmOperand,
+        size: AssemblyType,
     },
     Binary {
         op: AsmBinaryOp,
         left: AsmOperand,
         right: AsmOperand,
+        size: AssemblyType,
     },
     Cmp {
         left: AsmOperand,
         right: AsmOperand,
+        size: AssemblyType,
     },
-    Idiv(AsmOperand),
-    Cdq,
+    Idiv {
+        operand: AsmOperand,
+        size: AssemblyType,
+    },
+    Cdq {
+        size: AssemblyType,
+    },
     Jmp(String),
     JmpCC {
         condition: AsmConditional,
@@ -68,7 +84,7 @@ pub enum AsmInstruction {
 #[derive(Debug, Clone)]
 pub enum AsmOperand {
     Reg(AsmRegister),
-    Imm(i32),
+    Imm(i64),
     Stack(i32),
     Data(String),
 }
@@ -97,6 +113,7 @@ pub enum AsmRegister {
     R9,
     R10,
     R11,
+    RSP,
 }
 
 #[derive(Debug)]
@@ -107,6 +124,12 @@ pub enum AsmConditional {
     GreaterOrEqual,
     Less,
     LessOrEqual,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssemblyType {
+    Dword, // 16b
+    Qword, // 32b
 }
 
 #[derive(Debug)]
@@ -146,8 +169,22 @@ impl AsmProgram {
                             top_level
                                 .push(AsmTopLevel::Function(self.parse_tac_function(function)));
                         }
-                        TacTopLevel::StaticVariable { name, init, global } => {
-                            top_level.push(AsmTopLevel::StaticVariable { name, init, global });
+                        TacTopLevel::StaticVariable {
+                            name,
+                            init,
+                            global,
+                            var_type,
+                        } => {
+                            let alignment: u32 = match var_type {
+                                Type::Long => 8,
+                                _ => 4,
+                            };
+                            top_level.push(AsmTopLevel::StaticVariable {
+                                name,
+                                init,
+                                global,
+                                alignment,
+                            });
                         }
                     }
                 }
@@ -171,13 +208,23 @@ impl AsmProgram {
             AsmRegister::R9,
         ];
 
-        for (i, param) in function.params.iter().enumerate() {
+        for (i, (param, param_type)) in function
+            .params
+            .iter()
+            .zip(function.param_types.iter())
+            .enumerate()
+        {
             if i < 6 {
-                let offset = self.get_var_offset(param);
+                let size = match self.get_type_size(param_type) {
+                    AssemblyType::Dword => 4,
+                    AssemblyType::Qword => 8,
+                };
+                let offset = self.get_var_offset(param, size);
                 self.emit_mov(
                     &mut asm_instructions,
                     AsmOperand::Reg(arg_registers[i].clone()),
                     AsmOperand::Stack(offset),
+                    self.get_type_size(param_type),
                 );
             } else {
                 // 7th arg is at rbp + 16, 8th at rbp + 24, etc.
@@ -209,19 +256,28 @@ impl AsmProgram {
         for tac_instruction in tac_instructions {
             match tac_instruction {
                 TacInstruction::Ret(val) => {
+                    let size = self.get_operand_size(val);
                     asm_instructions.push(AsmInstruction::Mov {
                         src: self.to_asm_operand(val),
                         dst: AsmOperand::Reg(AsmRegister::RAX),
+                        size,
                     });
                     asm_instructions.push(AsmInstruction::Ret);
                 }
                 TacInstruction::Unary { op, src, dst } => {
                     let asm_src = self.to_asm_operand(src);
                     let asm_dst = self.to_asm_operand(dst);
+                    let size = self.get_operand_size(dst);
 
                     if *op == TacUnaryOp::Not {
-                        self.emit_cmp(asm_instructions, asm_src, AsmOperand::Imm(0));
-                        self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                        let src_size = self.get_operand_size(src);
+                        self.emit_cmp(asm_instructions, asm_src, AsmOperand::Imm(0), src_size);
+                        self.emit_mov(
+                            asm_instructions,
+                            AsmOperand::Imm(0),
+                            asm_dst.clone(),
+                            size.clone(),
+                        );
                         asm_instructions.push(AsmInstruction::SetCC {
                             condition: AsmConditional::Equal,
                             operand: asm_dst,
@@ -236,15 +292,17 @@ impl AsmProgram {
                             panic!("Unsupported unary op {:?}", op);
                         }
                     };
-                    self.emit_mov(asm_instructions, asm_src, asm_dst);
+                    self.emit_mov(asm_instructions, asm_src, asm_dst, size.clone());
                     asm_instructions.push(AsmInstruction::Unary {
                         op: asm_op,
                         operand: self.to_asm_operand(dst),
+                        size,
                     });
                 }
                 TacInstruction::JumpIfZero { condition, target } => {
                     let operand = self.to_asm_operand(condition);
-                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0));
+                    let size = self.get_operand_size(condition);
+                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0), size);
                     asm_instructions.push(AsmInstruction::JmpCC {
                         condition: AsmConditional::Equal,
                         target: target.clone(),
@@ -252,7 +310,8 @@ impl AsmProgram {
                 }
                 TacInstruction::JumpIfNotZero { condition, target } => {
                     let operand = self.to_asm_operand(condition);
-                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0));
+                    let size = self.get_operand_size(condition);
+                    self.emit_cmp(asm_instructions, operand, AsmOperand::Imm(0), size);
                     asm_instructions.push(AsmInstruction::JmpCC {
                         condition: AsmConditional::NotEqual,
                         target: target.clone(),
@@ -267,7 +326,8 @@ impl AsmProgram {
                 TacInstruction::Copy { src, dst } => {
                     let asm_src = self.to_asm_operand(src);
                     let asm_dst = self.to_asm_operand(dst);
-                    self.emit_mov(asm_instructions, asm_src, asm_dst);
+                    let size = self.get_operand_size(dst);
+                    self.emit_mov(asm_instructions, asm_src, asm_dst, size);
                 }
                 TacInstruction::Binary {
                     op,
@@ -278,19 +338,23 @@ impl AsmProgram {
                     let asm_src1 = self.to_asm_operand(src1);
                     let asm_src2 = self.to_asm_operand(src2);
                     let asm_dst = self.to_asm_operand(dst);
+                    let size = self.get_operand_size(dst);
+                    let op_size = self.get_operand_size(src1);
                     match op {
                         TacBinaryOp::Divide => {
                             self.emit_mov(
                                 asm_instructions,
                                 asm_src1,
                                 AsmOperand::Reg(AsmRegister::RAX),
+                                size.clone(),
                             );
-                            asm_instructions.push(AsmInstruction::Cdq);
-                            self.emit_idiv(asm_instructions, asm_src2);
+                            asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
+                            self.emit_idiv(asm_instructions, asm_src2, size.clone());
                             self.emit_mov(
                                 asm_instructions,
                                 AsmOperand::Reg(AsmRegister::RAX),
                                 asm_dst,
+                                size,
                             );
                         }
                         TacBinaryOp::Remainder => {
@@ -298,78 +362,125 @@ impl AsmProgram {
                                 asm_instructions,
                                 asm_src1,
                                 AsmOperand::Reg(AsmRegister::RAX),
+                                size.clone(),
                             );
-                            asm_instructions.push(AsmInstruction::Cdq);
-                            self.emit_idiv(asm_instructions, asm_src2);
+                            asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
+                            self.emit_idiv(asm_instructions, asm_src2, size.clone());
                             self.emit_mov(
                                 asm_instructions,
                                 AsmOperand::Reg(AsmRegister::RDX),
                                 asm_dst,
+                                size,
                             );
                         }
                         TacBinaryOp::Add => {
-                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
-                            self.emit_add(asm_instructions, asm_src2, asm_dst)
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_src1,
+                                asm_dst.clone(),
+                                size.clone(),
+                            );
+                            self.emit_add(asm_instructions, asm_src2, asm_dst, size)
                         }
 
                         TacBinaryOp::Subtract => {
-                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
-                            self.emit_sub(asm_instructions, asm_src2, asm_dst)
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_src1,
+                                asm_dst.clone(),
+                                size.clone(),
+                            );
+                            self.emit_sub(asm_instructions, asm_src2, asm_dst, size)
                         }
 
                         TacBinaryOp::Multiply => {
-                            self.emit_mov(asm_instructions, asm_src1, asm_dst.clone());
-                            self.emit_imul(asm_instructions, asm_src2, asm_dst)
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_src1,
+                                asm_dst.clone(),
+                                size.clone(),
+                            );
+                            self.emit_imul(asm_instructions, asm_src2, asm_dst, size)
                         }
                         TacBinaryOp::EqualTo => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::Equal,
                                 operand: asm_dst,
                             });
                         }
                         TacBinaryOp::NotEqualTo => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::NotEqual,
                                 operand: asm_dst,
                             });
                         }
                         TacBinaryOp::LessThan => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::Less,
                                 operand: asm_dst,
                             });
                         }
                         TacBinaryOp::GreaterThan => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::Greater,
                                 operand: asm_dst,
                             });
                         }
                         TacBinaryOp::LessOrEqual => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::LessOrEqual,
                                 operand: asm_dst,
                             });
                         }
                         TacBinaryOp::GreaterOrEqual => {
-                            self.emit_cmp(asm_instructions, asm_src1, asm_src2);
+                            self.emit_cmp(asm_instructions, asm_src1, asm_src2, op_size);
 
-                            self.emit_mov(asm_instructions, AsmOperand::Imm(0), asm_dst.clone());
+                            self.emit_mov(
+                                asm_instructions,
+                                AsmOperand::Imm(0),
+                                asm_dst.clone(),
+                                size,
+                            );
                             asm_instructions.push(AsmInstruction::SetCC {
                                 condition: AsmConditional::GreaterOrEqual,
                                 operand: asm_dst,
@@ -398,18 +509,34 @@ impl AsmProgram {
                     // First 6 args go to registers
                     for (index, arg) in args.iter().take(6).enumerate() {
                         let asm_op = self.to_asm_operand(arg);
+                        let size = self.get_operand_size(arg);
 
                         self.emit_mov(
                             asm_instructions,
                             asm_op,
                             AsmOperand::Reg(arg_registers[index].clone()),
+                            size,
                         );
                     }
 
                     // Arguments are placed on stack in reverse order
                     for arg in args.iter().skip(6).rev() {
                         let asm_op = self.to_asm_operand(arg);
-                        self.emit_mov(asm_instructions, asm_op, AsmOperand::Reg(AsmRegister::RAX));
+                        let size = self.get_operand_size(arg);
+                        if size == AssemblyType::Dword {
+                            self.emit_movsx(
+                                asm_instructions,
+                                asm_op,
+                                AsmOperand::Reg(AsmRegister::RAX),
+                            );
+                        } else {
+                            self.emit_mov(
+                                asm_instructions,
+                                asm_op,
+                                AsmOperand::Reg(AsmRegister::RAX),
+                                size,
+                            );
+                        }
                         asm_instructions
                             .push(AsmInstruction::Push(AsmOperand::Reg(AsmRegister::RAX)));
                     }
@@ -426,48 +553,135 @@ impl AsmProgram {
                     }
 
                     let dst_op = self.to_asm_operand(dst);
-                    self.emit_mov(asm_instructions, AsmOperand::Reg(AsmRegister::RAX), dst_op);
+                    let size = self.get_operand_size(dst);
+                    self.emit_mov(
+                        asm_instructions,
+                        AsmOperand::Reg(AsmRegister::RAX),
+                        dst_op,
+                        size,
+                    );
+                }
+                TacInstruction::SignExtend { src, dst } => {
+                    let src_op = self.to_asm_operand(src);
+                    let dst_op = self.to_asm_operand(dst);
+                    self.emit_movsx(asm_instructions, src_op, dst_op);
+                }
+                TacInstruction::Truncate { src, dst } => {
+                    // Truncate is just a move of the lower 32 bits
+                    let src_op = self.to_asm_operand(src);
+                    let dst_op = self.to_asm_operand(dst);
+                    self.emit_mov(asm_instructions, src_op, dst_op, AssemblyType::Dword);
                 }
             }
         }
     }
 
-    //Avoids stack to stack mov
     fn emit_mov(
         &mut self,
         asm_instructions: &mut Vec<AsmInstruction>,
         src: AsmOperand,
         dst: AsmOperand,
+        size: AssemblyType,
     ) {
+        let src = if let AsmOperand::Imm(val) = src {
+            if size == AssemblyType::Dword {
+                AsmOperand::Imm(val as i32 as i64)
+            } else {
+                AsmOperand::Imm(val)
+            }
+        } else {
+            src
+        };
+
         if self.is_memory(&dst) && self.is_memory(&src) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src,
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Mov {
                 src: tmp_reg,
                 dst,
+                size,
             });
         } else {
-            // Direct move is fine
-            asm_instructions.push(AsmInstruction::Mov { src, dst });
+            // Check if we are moving a large immediate to memory
+            // x86-64 does not allow move of 64b Imm to Memory directly
+            let requires_tmp_reg = if let AsmOperand::Imm(val) = &src {
+                if self.is_memory(&dst) && size == AssemblyType::Qword {
+                    // Check if value fits in 32-bit signed integer
+                    *val > i32::MAX as i64 || *val < i32::MIN as i64
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if requires_tmp_reg {
+                let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
+                asm_instructions.push(AsmInstruction::Mov {
+                    src,
+                    dst: tmp_reg.clone(),
+                    size: size.clone(),
+                });
+                asm_instructions.push(AsmInstruction::Mov {
+                    src: tmp_reg,
+                    dst,
+                    size,
+                });
+            } else {
+                // Direct move is fine
+                asm_instructions.push(AsmInstruction::Mov { src, dst, size });
+            }
         }
     }
 
-    // Avoid memory to memory operations
-    fn emit_idiv(&mut self, asm_instructions: &mut Vec<AsmInstruction>, operand: AsmOperand) {
+    fn emit_movsx(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        src: AsmOperand,
+        dst: AsmOperand,
+    ) {
+        if matches!(src, AsmOperand::Imm(_)) {
+            self.emit_mov(asm_instructions, src, dst, AssemblyType::Qword);
+        } else if self.is_memory(&dst) {
+            let tmp_reg = AsmOperand::Reg(AsmRegister::R11);
+            asm_instructions.push(AsmInstruction::Movsx {
+                src,
+                dst: tmp_reg.clone(),
+            });
+            self.emit_mov(asm_instructions, tmp_reg, dst, AssemblyType::Qword);
+        } else {
+            asm_instructions.push(AsmInstruction::Movsx { src, dst });
+        }
+    }
+
+    fn emit_idiv(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        operand: AsmOperand,
+        size: AssemblyType,
+    ) {
         if let AsmOperand::Imm(_) = &operand {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
                 src: operand,
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
-            asm_instructions.push(AsmInstruction::Idiv(tmp_reg));
+            asm_instructions.push(AsmInstruction::Idiv {
+                operand: tmp_reg,
+                size,
+            });
         } else {
-            asm_instructions.push(AsmInstruction::Idiv(operand))
+            asm_instructions.push(AsmInstruction::Idiv {
+                operand: operand,
+                size,
+            })
         }
     }
 
@@ -478,25 +692,44 @@ impl AsmProgram {
         asm_instructions: &mut Vec<AsmInstruction>,
         src: AsmOperand,
         dst: AsmOperand,
+        size: AssemblyType,
     ) {
-        if self.is_memory(&dst) && self.is_memory(&src) {
+        let src_op = if let AsmOperand::Imm(val) = &src {
+            if *val > i32::MAX as i64 || *val < i32::MIN as i64 {
+                let tmp = AsmOperand::Reg(AsmRegister::R10);
+                asm_instructions.push(AsmInstruction::Mov {
+                    src: src.clone(),
+                    dst: tmp.clone(),
+                    size: size.clone(),
+                });
+                tmp
+            } else {
+                src.clone()
+            }
+        } else {
+            src.clone()
+        };
+        if self.is_memory(&dst) && self.is_memory(&src_op) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
-                src: src.clone(),
+                src: src_op.clone(),
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Add,
                 left: dst,
                 right: tmp_reg,
+                size,
             });
         } else {
             // Direct move is fine
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Add,
                 left: dst,
-                right: src,
+                right: src_op,
+                size,
             });
         }
     }
@@ -508,25 +741,44 @@ impl AsmProgram {
         asm_instructions: &mut Vec<AsmInstruction>,
         src: AsmOperand,
         dst: AsmOperand,
+        size: AssemblyType,
     ) {
-        if self.is_memory(&dst) && self.is_memory(&src) {
+        let src_op = if let AsmOperand::Imm(val) = &src {
+            if *val > i32::MAX as i64 || *val < i32::MIN as i64 {
+                let tmp = AsmOperand::Reg(AsmRegister::R10);
+                asm_instructions.push(AsmInstruction::Mov {
+                    src: src.clone(),
+                    dst: tmp.clone(),
+                    size: size.clone(),
+                });
+                tmp
+            } else {
+                src.clone()
+            }
+        } else {
+            src.clone()
+        };
+        if self.is_memory(&dst) && self.is_memory(&src_op) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
-                src: src.clone(),
+                src: src_op.clone(),
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Sub,
                 left: dst,
                 right: tmp_reg,
+                size,
             });
         } else {
             // Direct move is fine
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Sub,
                 left: dst,
-                right: src,
+                right: src_op,
+                size,
             });
         }
     }
@@ -538,29 +790,50 @@ impl AsmProgram {
         asm_instructions: &mut Vec<AsmInstruction>,
         src: AsmOperand,
         dst: AsmOperand,
+        size: AssemblyType,
     ) {
+        let src_op = if let AsmOperand::Imm(val) = &src {
+            if *val > i32::MAX as i64 || *val < i32::MIN as i64 {
+                let tmp = AsmOperand::Reg(AsmRegister::R10);
+                asm_instructions.push(AsmInstruction::Mov {
+                    src: src.clone(),
+                    dst: tmp.clone(),
+                    size: size.clone(),
+                });
+                tmp
+            } else {
+                src.clone()
+            }
+        } else {
+            src.clone()
+        };
+
         if self.is_memory(&dst) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R11);
             asm_instructions.push(AsmInstruction::Mov {
                 src: dst.clone(),
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Mult,
                 left: tmp_reg.clone(),
-                right: src,
+                right: src_op,
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Mov {
                 src: tmp_reg.clone(),
                 dst: dst.clone(),
+                size,
             });
         } else {
             // Direct move is fine
             asm_instructions.push(AsmInstruction::Binary {
                 op: AsmBinaryOp::Mult,
                 left: dst,
-                right: src,
+                right: src_op,
+                size,
             });
         }
     }
@@ -570,17 +843,36 @@ impl AsmProgram {
         asm_instructions: &mut Vec<AsmInstruction>,
         left: AsmOperand,
         right: AsmOperand,
+        size: AssemblyType,
     ) {
-        if self.is_memory(&left) && self.is_memory(&right) {
+        let right_op = if let AsmOperand::Imm(val) = &right {
+            if *val > i32::MAX as i64 || *val < i32::MIN as i64 {
+                let tmp = AsmOperand::Reg(AsmRegister::R10);
+                asm_instructions.push(AsmInstruction::Mov {
+                    src: right.clone(),
+                    dst: tmp.clone(),
+                    size: size.clone(),
+                });
+                tmp
+            } else {
+                right.clone()
+            }
+        } else {
+            right.clone()
+        };
+
+        if self.is_memory(&left) && self.is_memory(&right_op) {
             // Use R10 as a temporary register for mem-to-mem moves
             let tmp_reg = AsmOperand::Reg(AsmRegister::R10);
             asm_instructions.push(AsmInstruction::Mov {
-                src: right.clone(),
+                src: right_op.clone(),
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Cmp {
                 left,
                 right: tmp_reg.clone(),
+                size,
             });
         } else if let AsmOperand::Imm(_) = &left {
             // Use R10 as a temporary register for mem-to-mem moves
@@ -588,29 +880,72 @@ impl AsmProgram {
             asm_instructions.push(AsmInstruction::Mov {
                 src: left.clone(),
                 dst: tmp_reg.clone(),
+                size: size.clone(),
             });
             asm_instructions.push(AsmInstruction::Cmp {
                 left: tmp_reg.clone(),
-                right,
+                right: right_op,
+                size,
             });
         } else {
-            asm_instructions.push(AsmInstruction::Cmp { left, right });
+            asm_instructions.push(AsmInstruction::Cmp {
+                left,
+                right: right_op,
+                size,
+            });
         }
     }
 
     fn to_asm_operand(&mut self, tac_operand: &TacOperand) -> AsmOperand {
         match tac_operand {
-            TacOperand::Const(val) => AsmOperand::Imm(*val),
-            TacOperand::Var(val) => AsmOperand::Stack(self.get_var_offset(val)),
-            TacOperand::Static(val) => AsmOperand::Data(val.clone()),
+            TacOperand::Const(val) => {
+                let num: i64 = match val {
+                    Const::ConstInt(val) => *val as i64,
+                    Const::ConstLong(val) => *val,
+                };
+                AsmOperand::Imm(num)
+            }
+            TacOperand::Var {
+                name,
+                var_type,
+                is_static,
+            } => {
+                if *is_static {
+                    AsmOperand::Data(name.clone())
+                } else {
+                    let size = match self.get_type_size(var_type) {
+                        AssemblyType::Dword => 4,
+                        AssemblyType::Qword => 8,
+                    };
+                    AsmOperand::Stack(self.get_var_offset(name, size))
+                }
+            }
+        }
+    }
+
+    fn get_operand_size(&self, operand: &TacOperand) -> AssemblyType {
+        match operand {
+            TacOperand::Var { var_type, .. } => self.get_type_size(var_type),
+            TacOperand::Const(val) => match val {
+                Const::ConstInt(_) => AssemblyType::Dword,
+                Const::ConstLong(_) => AssemblyType::Qword,
+            },
+        }
+    }
+
+    fn get_type_size(&self, var_type: &Type) -> AssemblyType {
+        match var_type {
+            Type::Int => AssemblyType::Dword,
+            Type::Long => AssemblyType::Qword,
+            _ => AssemblyType::Qword,
         }
     }
 
     // Return stack offset of tmp variable
     // Assign it one if seen for the first time
-    fn get_var_offset(&mut self, name: &str) -> i32 {
+    fn get_var_offset(&mut self, name: &str, size: i32) -> i32 {
         *self.stack_map.entry(name.to_string()).or_insert_with(|| {
-            self.stack_index -= 4; // currently only 32 bit
+            self.stack_index -= size;
             self.stack_index
         })
     }

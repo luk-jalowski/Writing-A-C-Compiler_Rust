@@ -5,7 +5,6 @@ use std::str::Chars;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     // Keywords
-    KeywordInt,
     KeywordReturn,
     KeywordVoid,
     KeywordIf,
@@ -17,6 +16,10 @@ pub enum TokenType {
     KeywordContinue,
     KeywordStatic,
     KeywordExtern,
+
+    //Types
+    KeywordInt,
+    KeywordLong,
 
     OpenParen,    // (
     CloseParen,   // )
@@ -46,7 +49,8 @@ pub enum TokenType {
     GreaterOrEqual, // >=
 
     // Literals
-    Integer(i32),
+    Integer32(i32),
+    Integer64(i64),
     Identifier(String),
 
     EOF,
@@ -248,9 +252,9 @@ impl<'a> Lexer<'a> {
                 }
 
                 '0'..='9' => {
-                    let num = self.lex_integer();
+                    let num_token = self.lex_integer();
                     tokens.push(Token {
-                        token_type: TokenType::Integer(num),
+                        token_type: num_token,
                     });
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
@@ -259,6 +263,7 @@ impl<'a> Lexer<'a> {
                     // Otherwise it is identifier
                     let word_type = match word.as_str() {
                         "int" => TokenType::KeywordInt,
+                        "long" => TokenType::KeywordLong,
                         "void" => TokenType::KeywordVoid,
                         "return" => TokenType::KeywordReturn,
                         "else" => TokenType::KeywordElse,
@@ -290,19 +295,35 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    fn lex_integer(&mut self) -> i32 {
+    fn lex_integer(&mut self) -> TokenType {
         let mut num_str = String::new();
+        let mut is_long = false;
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_digit() {
                 num_str.push(c);
                 self.chars.next();
             } else if c.is_ascii_alphabetic() {
+                if c == 'l' || c == 'L' {
+                    self.chars.next();
+                    if let Some(&next_c) = self.chars.peek() {
+                        if next_c.is_ascii_alphanumeric() {
+                            panic!("Alphabetic chars have no place next to long!");
+                        }
+                    }
+                    is_long = true;
+                    break;
+                }
                 panic!("Alphabetic chars have no place next to digits!");
             } else {
                 break;
             }
         }
-        num_str.parse().expect("Expected to parse an integer")
+        let val: i64 = num_str.parse().expect("Expected to parse an integer");
+        if is_long || val > i32::MAX as i64 || val < i32::MIN as i64 {
+            TokenType::Integer64(val)
+        } else {
+            TokenType::Integer32(val as i32)
+        }
     }
 
     fn lex_word(&mut self) -> String {
