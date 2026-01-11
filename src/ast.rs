@@ -142,13 +142,17 @@ pub enum BinaryOperator {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Int,  // 32b
+    Int, // 32b
+    UInt,
     Long, // 64 bit
+    ULong,
     FuncType { params: Vec<Type>, ret: Box<Type> },
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Const {
     ConstInt(i32),
+    ConstUInt(u32),
     ConstLong(i64),
+    ConstULong(u64),
 }

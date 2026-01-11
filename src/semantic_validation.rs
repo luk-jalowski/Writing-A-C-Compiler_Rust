@@ -242,7 +242,7 @@ impl SemanticValidation {
                     self.resolve_expression(arg);
                 }
             }
-            Expression::Cast { target_type, exp } => {
+            Expression::Cast { target_type: _, exp } => {
                 self.resolve_expression(exp);
             }
         }

@@ -52,7 +52,9 @@ impl CodeEmission {
 
                         let init_val = match init {
                             StaticInit::IntInit(val) => *val as i64,
+                            StaticInit::UIntInit(val) => *val as i64,
                             StaticInit::LongInit(val) => *val,
+                            StaticInit::ULongInit(val) => *val as i64,
                         };
 
                         if init_val == 0 {
@@ -60,10 +62,10 @@ impl CodeEmission {
                             instructions.push(format!("\t.balign {}\n", alignment)); // MACOS or Linux directive
                             instructions.push(format!("_{}:\n", name));
                             match init {
-                                StaticInit::IntInit(_) => {
+                                StaticInit::IntInit(_) | StaticInit::UIntInit(_) => {
                                     instructions.push("\t.zero 4\n".to_string())
                                 }
-                                StaticInit::LongInit(_) => {
+                                StaticInit::LongInit(_) | StaticInit::ULongInit(_) => {
                                     instructions.push("\t.zero 8\n".to_string())
                                 }
                             }
@@ -75,7 +77,13 @@ impl CodeEmission {
                                 StaticInit::IntInit(val) => {
                                     instructions.push(format!("\t.long {}\n", val))
                                 }
+                                StaticInit::UIntInit(val) => {
+                                    instructions.push(format!("\t.long {}\n", val))
+                                }
                                 StaticInit::LongInit(val) => {
+                                    instructions.push(format!("\t.quad {}\n", val))
+                                }
+                                StaticInit::ULongInit(val) => {
                                     instructions.push(format!("\t.quad {}\n", val))
                                 }
                             }
@@ -124,6 +132,13 @@ impl CodeEmission {
                         self.asm_operand_to_string(src, &AssemblyType::Dword)
                     ));
                 }
+                AsmInstruction::MovZeroExtend { src, dst } => {
+                    asm_code.push(format!(
+                        "\tmovzx {}, {}\n",
+                        self.asm_operand_to_string(dst, &AssemblyType::Qword),
+                        self.asm_operand_to_string(src, &AssemblyType::Dword)
+                    ));
+                }
                 AsmInstruction::Ret => {
                     asm_code.push("\tmov rsp, rbp\n".to_string());
                     asm_code.push("\tpop rbp\n".to_string());
@@ -152,6 +167,12 @@ impl CodeEmission {
                 AsmInstruction::Idiv { operand, size } => {
                     asm_code.push(format!(
                         "\tidiv {}\n",
+                        self.asm_operand_to_string(operand, size)
+                    ));
+                }
+                AsmInstruction::Div { operand, size } => {
+                    asm_code.push(format!(
+                        "\tdiv {}\n",
                         self.asm_operand_to_string(operand, size)
                     ));
                 }
@@ -305,6 +326,10 @@ impl CodeEmission {
             AsmConditional::LessOrEqual => "le".to_string(),
             AsmConditional::Greater => "g".to_string(),
             AsmConditional::GreaterOrEqual => "ge".to_string(),
+            AsmConditional::Above => "a".to_string(),
+            AsmConditional::AboveOrEqual => "ae".to_string(),
+            AsmConditional::Below => "b".to_string(),
+            AsmConditional::BelowOrEqual => "be".to_string(),
         }
     }
 }

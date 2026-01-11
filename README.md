@@ -21,7 +21,7 @@ A C compiler written in Rust, targeting x86-64 assembly. This project implements
   - Supports Position Independent Code (PIC) via RIP-relative addressing for globals.
 
 ### Supported Language Constructs
-- **Types**: `int` (32-bit signed).
+- **Types**: `int` (32-bit), `long` (64-bit)
 - **Storage Classes**: default, `static`, `extern`.
 - **Control Flow**: `if`, `else`, `while`, `do-while`, `for`, `break`, `continue`, `return`.
 - **Operators**:
@@ -35,8 +35,6 @@ A C compiler written in Rust, targeting x86-64 assembly. This project implements
 ## Roadmap / To-Do
 - **Preprocessor**
 - **Types**:
-  - Long Integers
-  - Unsigned Integers
   - Floating Point Numbers
   - Pointers
   - Arrays and Pointer Arithmetic

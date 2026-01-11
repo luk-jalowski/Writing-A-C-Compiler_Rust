@@ -76,6 +76,10 @@ pub enum TacInstruction {
         src: TacOperand,
         dst: TacOperand,
     },
+    ZeroExtend {
+        src: TacOperand,
+        dst: TacOperand,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -206,11 +210,27 @@ impl TacProgram {
                                         var_type: symbol_type.clone(),
                                     });
                                 }
+                                Type::UInt => {
+                                    static_vars.push(TacTopLevel::StaticVariable {
+                                        name: name.clone(),
+                                        global: *global,
+                                        init: StaticInit::UIntInit(0),
+                                        var_type: symbol_type.clone(),
+                                    });
+                                }
                                 Type::Long => {
                                     static_vars.push(TacTopLevel::StaticVariable {
                                         name: name.clone(),
                                         global: *global,
                                         init: StaticInit::LongInit(0),
+                                        var_type: symbol_type.clone(),
+                                    });
+                                }
+                                Type::ULong => {
+                                    static_vars.push(TacTopLevel::StaticVariable {
+                                        name: name.clone(),
+                                        global: *global,
+                                        init: StaticInit::ULongInit(0),
                                         var_type: symbol_type.clone(),
                                     });
                                 }
@@ -674,32 +694,57 @@ impl TacProgram {
                     .clone()
                     .expect("Type validation must run before TAC generation");
                 let src = self.parse_expression(*exp, tac_instructions);
+
+                if src_type == target_type {
+                    return src;
+                }
                 let dst = self.new_temp_var(
                     expression
                         .etype
                         .expect("Expessions is expected to have type!"),
                 );
 
-                match (src_type, target_type) {
-                    (Type::Int, Type::Long) => {
-                        tac_instructions.push(TacInstruction::SignExtend {
-                            src,
-                            dst: dst.clone(),
-                        });
-                    }
-                    (Type::Long, Type::Int) => {
-                        tac_instructions.push(TacInstruction::Truncate {
-                            src,
-                            dst: dst.clone(),
-                        });
-                    }
-                    _ => {
-                        tac_instructions.push(TacInstruction::Copy {
-                            src,
-                            dst: dst.clone(),
-                        });
-                    }
+                if self.get_type_size(&target_type) == self.get_type_size(&src_type) {
+                    tac_instructions.push(TacInstruction::Copy {
+                        src,
+                        dst: dst.clone(),
+                    });
+                } else if self.get_type_size(&target_type) < self.get_type_size(&src_type) {
+                    tac_instructions.push(TacInstruction::Truncate {
+                        src,
+                        dst: dst.clone(),
+                    });
+                } else if src_type == Type::UInt || src_type == Type::ULong {
+                    tac_instructions.push(TacInstruction::ZeroExtend {
+                        src,
+                        dst: dst.clone(),
+                    });
+                } else {
+                    tac_instructions.push(TacInstruction::SignExtend {
+                        src,
+                        dst: dst.clone(),
+                    });
                 }
+                // match (src_type, target_type) {
+                //     (Type::Int, Type::Long) => {
+                //         tac_instructions.push(TacInstruction::SignExtend {
+                //             src,
+                //             dst: dst.clone(),
+                //         });
+                //     }
+                //     (Type::Long, Type::Int) => {
+                //         tac_instructions.push(TacInstruction::Truncate {
+                //             src,
+                //             dst: dst.clone(),
+                //         });
+                //     }
+                //     _ => {
+                //         tac_instructions.push(TacInstruction::Copy {
+                //             src,
+                //             dst: dst.clone(),
+                //         });
+                //     }
+                // }
                 dst
             }
         }
@@ -716,5 +761,14 @@ impl TacProgram {
                 }
             }
         }
+    }
+
+    fn get_type_size(&mut self, type1: &Type) -> u32 {
+        let size = match type1 {
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong => 8,
+            _ => 4,
+        };
+        size
     }
 }

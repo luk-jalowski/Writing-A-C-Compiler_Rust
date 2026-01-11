@@ -47,6 +47,8 @@ impl Parser {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordInt)
             | Some(TokenType::KeywordLong)
+            | Some(TokenType::KeywordSigned)
+            | Some(TokenType::KeywordUnsigned)
             | Some(TokenType::KeywordStatic)
             | Some(TokenType::KeywordExtern) => BlockItem::Declaration(self.parse_declaration()),
             _ => BlockItem::Statement(self.parse_statement()),
@@ -126,17 +128,25 @@ impl Parser {
     }
 
     fn parse_type_and_storage_class(&mut self) -> (Type, Option<StorageClass>) {
-        let mut types = Vec::<Type>::new();
+        let mut types = Vec::<String>::new();
         let mut storage_classes = Vec::<StorageClass>::new();
         while let Some(token) = self.peek_token() {
             match token.token_type {
                 TokenType::KeywordInt => {
                     self.consume_token();
-                    types.push(Type::Int);
+                    types.push("int".to_string());
                 }
                 TokenType::KeywordLong => {
                     self.consume_token();
-                    types.push(Type::Long);
+                    types.push("long".to_string());
+                }
+                TokenType::KeywordSigned => {
+                    self.consume_token();
+                    types.push("signed".to_string());
+                }
+                TokenType::KeywordUnsigned => {
+                    self.consume_token();
+                    types.push("unsigned".to_string());
                 }
                 TokenType::KeywordStatic => {
                     self.consume_token();
@@ -172,12 +182,44 @@ impl Parser {
         (result_type, storage_class)
     }
 
-    fn parse_type(&mut self, types: Vec<Type>) -> Type {
-        match types.as_slice() {
-            [Type::Int] => Type::Int,
-            [Type::Long] | [Type::Int, Type::Long] | [Type::Long, Type::Int] => Type::Long,
-            _ => panic!("Invalid type specifier {:?}", types),
+    fn parse_type(&mut self, types: Vec<String>) -> Type {
+        let mut int_count = 0;
+        let mut long_count = 0;
+        let mut signed_count = 0;
+        let mut unsigned_count = 0;
+
+        for t in &types {
+            match t.as_str() {
+                "int" => int_count += 1,
+                "long" => long_count += 1,
+                "signed" => signed_count += 1,
+                "unsigned" => unsigned_count += 1,
+                _ => panic!("Unknown type specifier {}", t),
+            }
         }
+
+        if types.is_empty()
+            || signed_count > 1
+            || unsigned_count > 1
+            || (signed_count > 0 && unsigned_count > 0)
+            || int_count > 1
+            || long_count > 2
+        {
+            panic!("parse_type Invalid type specifier {:?}", types);
+        }
+
+        if long_count > 0 {
+            if unsigned_count > 0 {
+                return Type::ULong;
+            }
+            return Type::Long;
+        }
+
+        if unsigned_count > 0 {
+            return Type::UInt;
+        }
+
+        Type::Int
     }
 
     fn parse_param_list(&mut self) -> (Vec<String>, Vec<Type>) {
@@ -346,6 +388,8 @@ impl Parser {
     fn parse_for_init(&mut self) -> ForInit {
         if let Some(TokenType::KeywordInt)
         | Some(TokenType::KeywordLong)
+        | Some(TokenType::KeywordSigned)
+        | Some(TokenType::KeywordUnsigned)
         | Some(TokenType::KeywordStatic)
         | Some(TokenType::KeywordExtern) = self.peek_token().map(|t| t.token_type)
         {
@@ -374,8 +418,16 @@ impl Parser {
                     expr: Expression::Constant(Const::ConstInt(val)),
                     etype: None,
                 },
+                TokenType::UnsignedInteger32(val) => TypedExpression {
+                    expr: Expression::Constant(Const::ConstUInt(val)),
+                    etype: None,
+                },
                 TokenType::Integer64(val) => TypedExpression {
                     expr: Expression::Constant(Const::ConstLong(val)),
+                    etype: None,
+                },
+                TokenType::UnsignedInteger64(val) => TypedExpression {
+                    expr: Expression::Constant(Const::ConstULong(val)),
                     etype: None,
                 },
                 TokenType::Hyphen => TypedExpression {
@@ -400,17 +452,27 @@ impl Parser {
                     let next_token = self.peek_token().map(|t| t.token_type);
                     if next_token == Some(TokenType::KeywordInt)
                         || next_token == Some(TokenType::KeywordLong)
+                        || next_token == Some(TokenType::KeywordSigned)
+                        || next_token == Some(TokenType::KeywordUnsigned)
                     {
-                        let mut types = Vec::new();
+                        let mut types: Vec<String> = Vec::<String>::new();
                         while let Some(token) = self.peek_token() {
                             match token.token_type {
                                 TokenType::KeywordInt => {
                                     self.consume_token();
-                                    types.push(Type::Int);
+                                    types.push("int".to_string());
                                 }
                                 TokenType::KeywordLong => {
                                     self.consume_token();
-                                    types.push(Type::Long);
+                                    types.push("long".to_string());
+                                }
+                                TokenType::KeywordSigned => {
+                                    self.consume_token();
+                                    types.push("signed".to_string());
+                                }
+                                TokenType::KeywordUnsigned => {
+                                    self.consume_token();
+                                    types.push("unsigned".to_string());
                                 }
                                 _ => break,
                             }

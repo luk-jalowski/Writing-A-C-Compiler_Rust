@@ -40,6 +40,10 @@ pub enum AsmInstruction {
         src: AsmOperand,
         dst: AsmOperand,
     },
+    MovZeroExtend {
+        src: AsmOperand,
+        dst: AsmOperand,
+    },
     Unary {
         op: AsmUnaryOp,
         operand: AsmOperand,
@@ -57,6 +61,10 @@ pub enum AsmInstruction {
         size: AssemblyType,
     },
     Idiv {
+        operand: AsmOperand,
+        size: AssemblyType,
+    },
+    Div {
         operand: AsmOperand,
         size: AssemblyType,
     },
@@ -124,6 +132,10 @@ pub enum AsmConditional {
     GreaterOrEqual,
     Less,
     LessOrEqual,
+    Above,
+    AboveOrEqual,
+    Below,
+    BelowOrEqual,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,7 +188,7 @@ impl AsmProgram {
                             var_type,
                         } => {
                             let alignment: u32 = match var_type {
-                                Type::Long => 8,
+                                Type::Long | Type::ULong => 8,
                                 _ => 4,
                             };
                             top_level.push(AsmTopLevel::StaticVariable {
@@ -348,8 +360,22 @@ impl AsmProgram {
                                 AsmOperand::Reg(AsmRegister::RAX),
                                 size.clone(),
                             );
-                            asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
-                            self.emit_idiv(asm_instructions, asm_src2, size.clone());
+                            if self.is_signed(dst) {
+                                asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
+                            } else {
+                                self.emit_mov(
+                                    asm_instructions,
+                                    AsmOperand::Imm(0),
+                                    AsmOperand::Reg(AsmRegister::RDX),
+                                    size.clone(),
+                                );
+                            }
+                            self.emit_div(
+                                asm_instructions,
+                                asm_src2,
+                                size.clone(),
+                                self.is_signed(dst),
+                            );
                             self.emit_mov(
                                 asm_instructions,
                                 AsmOperand::Reg(AsmRegister::RAX),
@@ -364,8 +390,22 @@ impl AsmProgram {
                                 AsmOperand::Reg(AsmRegister::RAX),
                                 size.clone(),
                             );
-                            asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
-                            self.emit_idiv(asm_instructions, asm_src2, size.clone());
+                            if self.is_signed(dst) {
+                                asm_instructions.push(AsmInstruction::Cdq { size: size.clone() });
+                            } else {
+                                self.emit_mov(
+                                    asm_instructions,
+                                    AsmOperand::Imm(0),
+                                    AsmOperand::Reg(AsmRegister::RDX),
+                                    size.clone(),
+                                );
+                            }
+                            self.emit_div(
+                                asm_instructions,
+                                asm_src2,
+                                size.clone(),
+                                self.is_signed(dst),
+                            );
                             self.emit_mov(
                                 asm_instructions,
                                 AsmOperand::Reg(AsmRegister::RDX),
@@ -439,8 +479,13 @@ impl AsmProgram {
                                 asm_dst.clone(),
                                 size,
                             );
+                            let condition = if self.is_signed(src1) {
+                                AsmConditional::Less
+                            } else {
+                                AsmConditional::Below
+                            };
                             asm_instructions.push(AsmInstruction::SetCC {
-                                condition: AsmConditional::Less,
+                                condition,
                                 operand: asm_dst,
                             });
                         }
@@ -453,8 +498,13 @@ impl AsmProgram {
                                 asm_dst.clone(),
                                 size,
                             );
+                            let condition = if self.is_signed(src1) {
+                                AsmConditional::Greater
+                            } else {
+                                AsmConditional::Above
+                            };
                             asm_instructions.push(AsmInstruction::SetCC {
-                                condition: AsmConditional::Greater,
+                                condition,
                                 operand: asm_dst,
                             });
                         }
@@ -467,8 +517,13 @@ impl AsmProgram {
                                 asm_dst.clone(),
                                 size,
                             );
+                            let condition = if self.is_signed(src1) {
+                                AsmConditional::LessOrEqual
+                            } else {
+                                AsmConditional::BelowOrEqual
+                            };
                             asm_instructions.push(AsmInstruction::SetCC {
-                                condition: AsmConditional::LessOrEqual,
+                                condition,
                                 operand: asm_dst,
                             });
                         }
@@ -481,8 +536,13 @@ impl AsmProgram {
                                 asm_dst.clone(),
                                 size,
                             );
+                            let condition = if self.is_signed(src1) {
+                                AsmConditional::GreaterOrEqual
+                            } else {
+                                AsmConditional::AboveOrEqual
+                            };
                             asm_instructions.push(AsmInstruction::SetCC {
-                                condition: AsmConditional::GreaterOrEqual,
+                                condition,
                                 operand: asm_dst,
                             });
                         }
@@ -572,6 +632,11 @@ impl AsmProgram {
                     let dst_op = self.to_asm_operand(dst);
                     self.emit_mov(asm_instructions, src_op, dst_op, AssemblyType::Dword);
                 }
+                TacInstruction::ZeroExtend { src, dst } => {
+                    let src_op = self.to_asm_operand(src);
+                    let dst_op = self.to_asm_operand(dst);
+                    self.emit_movzx(asm_instructions, src_op, dst_op);
+                }
             }
         }
     }
@@ -658,12 +723,36 @@ impl AsmProgram {
             asm_instructions.push(AsmInstruction::Movsx { src, dst });
         }
     }
+    fn emit_movzx(
+        &mut self,
+        asm_instructions: &mut Vec<AsmInstruction>,
+        src: AsmOperand,
+        dst: AsmOperand,
+    ) {
+        if matches!(dst, AsmOperand::Reg(_)) {
+            self.emit_mov(asm_instructions, src, dst, AssemblyType::Dword);
+        } else {
+            self.emit_mov(
+                asm_instructions,
+                src,
+                AsmOperand::Reg(AsmRegister::R11),
+                AssemblyType::Dword,
+            );
+            self.emit_mov(
+                asm_instructions,
+                AsmOperand::Reg(AsmRegister::R11),
+                dst,
+                AssemblyType::Qword,
+            );
+        }
+    }
 
-    fn emit_idiv(
+    fn emit_div(
         &mut self,
         asm_instructions: &mut Vec<AsmInstruction>,
         operand: AsmOperand,
         size: AssemblyType,
+        signed: bool,
     ) {
         if let AsmOperand::Imm(_) = &operand {
             // Use R10 as a temporary register for mem-to-mem moves
@@ -673,15 +762,29 @@ impl AsmProgram {
                 dst: tmp_reg.clone(),
                 size: size.clone(),
             });
-            asm_instructions.push(AsmInstruction::Idiv {
-                operand: tmp_reg,
-                size,
-            });
+            if signed {
+                asm_instructions.push(AsmInstruction::Idiv {
+                    operand: tmp_reg,
+                    size,
+                });
+            } else {
+                asm_instructions.push(AsmInstruction::Div {
+                    operand: tmp_reg,
+                    size,
+                });
+            }
         } else {
-            asm_instructions.push(AsmInstruction::Idiv {
-                operand: operand,
-                size,
-            })
+            if signed {
+                asm_instructions.push(AsmInstruction::Idiv {
+                    operand: operand,
+                    size,
+                })
+            } else {
+                asm_instructions.push(AsmInstruction::Div {
+                    operand: operand,
+                    size,
+                });
+            }
         }
     }
 
@@ -901,7 +1004,9 @@ impl AsmProgram {
             TacOperand::Const(val) => {
                 let num: i64 = match val {
                     Const::ConstInt(val) => *val as i64,
+                    Const::ConstUInt(val) => *val as i64,
                     Const::ConstLong(val) => *val,
+                    Const::ConstULong(val) => *val as i64,
                 };
                 AsmOperand::Imm(num)
             }
@@ -928,15 +1033,17 @@ impl AsmProgram {
             TacOperand::Var { var_type, .. } => self.get_type_size(var_type),
             TacOperand::Const(val) => match val {
                 Const::ConstInt(_) => AssemblyType::Dword,
+                Const::ConstUInt(_) => AssemblyType::Dword,
                 Const::ConstLong(_) => AssemblyType::Qword,
+                Const::ConstULong(_) => AssemblyType::Qword,
             },
         }
     }
 
     fn get_type_size(&self, var_type: &Type) -> AssemblyType {
         match var_type {
-            Type::Int => AssemblyType::Dword,
-            Type::Long => AssemblyType::Qword,
+            Type::Int | Type::UInt => AssemblyType::Dword,
+            Type::Long | Type::ULong => AssemblyType::Qword,
             _ => AssemblyType::Qword,
         }
     }
@@ -952,5 +1059,18 @@ impl AsmProgram {
 
     fn is_memory(&self, op: &AsmOperand) -> bool {
         matches!(op, AsmOperand::Stack(_) | AsmOperand::Data(_))
+    }
+
+    fn is_signed(&self, op: &TacOperand) -> bool {
+        match op {
+            TacOperand::Var { var_type, .. } => match var_type {
+                Type::Int | Type::Long => true,
+                _ => false,
+            },
+            TacOperand::Const(c) => match c {
+                Const::ConstInt(_) | Const::ConstLong(_) => true,
+                _ => false,
+            },
+        }
     }
 }

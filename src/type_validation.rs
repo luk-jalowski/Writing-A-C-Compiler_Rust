@@ -29,7 +29,9 @@ pub enum InitialValue {
 #[derive(Debug, Clone)]
 pub enum StaticInit {
     IntInit(i32),
+    UIntInit(u32),
     LongInit(i64),
+    ULongInit(u64),
 }
 
 impl Default for TypeValidation {
@@ -181,9 +183,19 @@ impl TypeValidation {
                             Type::Long => InitialValue::Initial(StaticInit::LongInit(*i as i64)),
                             _ => InitialValue::Initial(StaticInit::IntInit(*i)),
                         },
+                        Const::ConstUInt(ui) => match var_decl.var_type {
+                            //TODO fix this
+                            Type::Long => InitialValue::Initial(StaticInit::ULongInit(*ui as u64)),
+                            _ => InitialValue::Initial(StaticInit::UIntInit(*ui)),
+                        },
                         Const::ConstLong(l) => match var_decl.var_type {
                             Type::Int => InitialValue::Initial(StaticInit::IntInit(*l as i32)),
                             _ => InitialValue::Initial(StaticInit::LongInit(*l)),
+                        },
+                        Const::ConstULong(ul) => match var_decl.var_type {
+                            //TODO fix this
+                            Type::Int => InitialValue::Initial(StaticInit::UIntInit(*ul as u32)),
+                            _ => InitialValue::Initial(StaticInit::ULongInit(*ul)),
                         },
                     },
                     _ => InitialValue::Initial(StaticInit::IntInit(0)),
@@ -324,7 +336,9 @@ impl TypeValidation {
             Expression::Constant(c) => {
                 typed_expr.etype = Some(match c {
                     Const::ConstInt(_) => Type::Int,
+                    Const::ConstUInt(_) => Type::UInt,
                     Const::ConstLong(_) => Type::Long,
+                    Const::ConstULong(_) => Type::ULong,
                 });
             }
             Expression::FunctionCall { name, args } => {
@@ -389,12 +403,7 @@ impl TypeValidation {
                     return;
                 }
 
-                let common_type =
-                    if matches!(left_type, Type::Long) || matches!(right_type, Type::Long) {
-                        Type::Long
-                    } else {
-                        Type::Int
-                    };
+                let common_type = self.get_common_type(left_type, right_type);
 
                 if *left_type != common_type {
                     let old_expr =
@@ -473,11 +482,7 @@ impl TypeValidation {
                 let t1 = exp1.etype.as_ref().unwrap();
                 let t2 = exp2.etype.as_ref().unwrap();
 
-                let common_type = if matches!(t1, Type::Long) || matches!(t2, Type::Long) {
-                    Type::Long
-                } else {
-                    Type::Int
-                };
+                let common_type = self.get_common_type(t1, t2);
 
                 if *t1 != common_type {
                     let old_expr =
@@ -598,5 +603,33 @@ impl TypeValidation {
             }
             _ => {}
         }
+    }
+
+    fn get_common_type(&mut self, type1: &Type, type2: &Type) -> Type {
+        if *type1 == *type2 {
+            return type1.clone();
+        }
+
+        if self.get_type_size(type1) == self.get_type_size(type2) {
+            if *type1 == Type::Int || *type1 == Type::Long {
+                return type2.clone();
+            } else {
+                return type1.clone();
+            }
+        }
+        if self.get_type_size(&type1) > self.get_type_size(&type2) {
+            return type1.clone();
+        } else {
+            return type2.clone();
+        }
+    }
+
+    fn get_type_size(&mut self, type1: &Type) -> u32 {
+        let size = match type1 {
+            Type::Int | Type::UInt => 4,
+            Type::Long | Type::ULong => 8,
+            _ => 4,
+        };
+        size
     }
 }

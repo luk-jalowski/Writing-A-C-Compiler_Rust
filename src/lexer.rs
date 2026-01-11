@@ -20,6 +20,8 @@ pub enum TokenType {
     //Types
     KeywordInt,
     KeywordLong,
+    KeywordSigned,
+    KeywordUnsigned,
 
     OpenParen,    // (
     CloseParen,   // )
@@ -51,6 +53,8 @@ pub enum TokenType {
     // Literals
     Integer32(i32),
     Integer64(i64),
+    UnsignedInteger32(u32),
+    UnsignedInteger64(u64),
     Identifier(String),
 
     EOF,
@@ -275,6 +279,8 @@ impl<'a> Lexer<'a> {
                         "continue" => TokenType::KeywordContinue,
                         "static" => TokenType::KeywordStatic,
                         "extern" => TokenType::KeywordExtern,
+                        "signed" => TokenType::KeywordSigned,
+                        "unsigned" => TokenType::KeywordUnsigned,
                         _ => TokenType::Identifier(word),
                     };
                     tokens.push(Token {
@@ -297,32 +303,60 @@ impl<'a> Lexer<'a> {
 
     fn lex_integer(&mut self) -> TokenType {
         let mut num_str = String::new();
-        let mut is_long = false;
         while let Some(&c) = self.chars.peek() {
             if c.is_ascii_digit() {
                 num_str.push(c);
                 self.chars.next();
-            } else if c.is_ascii_alphabetic() {
-                if c == 'l' || c == 'L' {
-                    self.chars.next();
-                    if let Some(&next_c) = self.chars.peek() {
-                        if next_c.is_ascii_alphanumeric() {
-                            panic!("Alphabetic chars have no place next to long!");
-                        }
-                    }
-                    is_long = true;
-                    break;
-                }
-                panic!("Alphabetic chars have no place next to digits!");
             } else {
                 break;
             }
         }
-        let val: i64 = num_str.parse().expect("Expected to parse an integer");
-        if is_long || val > i32::MAX as i64 || val < i32::MIN as i64 {
-            TokenType::Integer64(val)
+
+        let mut is_long = false;
+        let mut is_unsigned = false;
+
+        if let Some(&c) = self.chars.peek() {
+            if c == 'u' || c == 'U' {
+                is_unsigned = true;
+                self.chars.next();
+                if let Some(&next_c) = self.chars.peek() {
+                    if next_c == 'l' || next_c == 'L' {
+                        is_long = true;
+                        self.chars.next();
+                    }
+                }
+            } else if c == 'l' || c == 'L' {
+                is_long = true;
+                self.chars.next();
+                if let Some(&next_c) = self.chars.peek() {
+                    if next_c == 'u' || next_c == 'U' {
+                        is_unsigned = true;
+                        self.chars.next();
+                    }
+                }
+            }
+        }
+
+        if let Some(&c) = self.chars.peek() {
+            if c.is_ascii_alphanumeric() {
+                panic!("Invalid suffix or identifier part after number");
+            }
+        }
+
+        let val: u64 = num_str.parse().expect("Expected to parse an integer");
+
+        if is_unsigned {
+            if is_long || val > u32::MAX as u64 {
+                TokenType::UnsignedInteger64(val)
+            } else {
+                TokenType::UnsignedInteger32(val as u32)
+            }
         } else {
-            TokenType::Integer32(val as i32)
+            if is_long || val > i32::MAX as u64 {
+                TokenType::Integer64(val as i64)
+            } else {
+                TokenType::Integer32(val as i32)
+            }
         }
     }
 
