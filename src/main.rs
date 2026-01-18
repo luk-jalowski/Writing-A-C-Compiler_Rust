@@ -89,7 +89,7 @@ fn main() {
         return;
     }
 
-    let mut asm_program = AsmProgram::new();
+    let mut asm_program = AsmProgram::new(tac_program.label_counter);
     let asm_ast = asm_program.generate_assembly(tac_ast);
     println!("Generated assembly instructions {:?}", asm_ast);
 

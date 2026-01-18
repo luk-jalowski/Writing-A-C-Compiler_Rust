@@ -80,6 +80,24 @@ pub enum TacInstruction {
         src: TacOperand,
         dst: TacOperand,
     },
+    DoubleToInt {
+        src: TacOperand,
+        dst: TacOperand,
+    },
+    DoubleToUInt {
+        src: TacOperand,
+        dst: TacOperand,
+        dst_type: Type,
+    },
+    IntToDouble {
+        src: TacOperand,
+        dst: TacOperand,
+    },
+    UIntToDouble {
+        src: TacOperand,
+        dst: TacOperand,
+        src_type: Type,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +135,7 @@ pub enum TacBinaryOp {
 #[derive(Debug)]
 pub struct TacProgram {
     var_counter: usize,
-    label_counter: usize,
+    pub label_counter: usize,
     static_vars: HashSet<String>,
 }
 
@@ -234,6 +252,14 @@ impl TacProgram {
                                         var_type: symbol_type.clone(),
                                     });
                                 }
+                                Type::Double => {
+                                    static_vars.push(TacTopLevel::StaticVariable {
+                                        name: name.clone(),
+                                        global: *global,
+                                        init: StaticInit::Double(0.0),
+                                        var_type: symbol_type.clone(),
+                                    });
+                                }
                                 _ => {
                                     panic!("generate_tac Unsupported type {:?}", symbol_type)
                                 }
@@ -317,17 +343,20 @@ impl TacProgram {
         var_decl: VarDecl,
         tac_instructions: &mut Vec<TacInstruction>,
     ) {
+        let is_static = self.static_vars.contains(&var_decl.name);
+
         if let Some(expr) = var_decl.init {
-            let src = self.parse_expression(expr, tac_instructions);
-            let is_static = self.static_vars.contains(&var_decl.name);
-            tac_instructions.push(TacInstruction::Copy {
-                src,
-                dst: TacOperand::Var {
-                    name: var_decl.name,
-                    var_type: var_decl.var_type,
-                    is_static,
-                },
-            });
+            if !is_static {
+                let src = self.parse_expression(expr, tac_instructions);
+                tac_instructions.push(TacInstruction::Copy {
+                    src,
+                    dst: TacOperand::Var {
+                        name: var_decl.name,
+                        var_type: var_decl.var_type,
+                        is_static,
+                    },
+                });
+            }
         }
     }
 
@@ -704,6 +733,40 @@ impl TacProgram {
                         .expect("Expessions is expected to have type!"),
                 );
 
+                if src_type == Type::Double {
+                    if matches!(target_type, Type::Int | Type::Long) {
+                        tac_instructions.push(TacInstruction::DoubleToInt {
+                            src,
+                            dst: dst.clone(),
+                        });
+                        return dst;
+                    } else if matches!(target_type, Type::UInt | Type::ULong) {
+                        tac_instructions.push(TacInstruction::DoubleToUInt {
+                            src,
+                            dst: dst.clone(),
+                            dst_type: target_type,
+                        });
+                        return dst;
+                    }
+                }
+
+                if target_type == Type::Double {
+                    if matches!(src_type, Type::Int | Type::Long) {
+                        tac_instructions.push(TacInstruction::IntToDouble {
+                            src,
+                            dst: dst.clone(),
+                        });
+                        return dst;
+                    } else if matches!(src_type, Type::UInt | Type::ULong) {
+                        tac_instructions.push(TacInstruction::UIntToDouble {
+                            src,
+                            dst: dst.clone(),
+                            src_type,
+                        });
+                        return dst;
+                    }
+                }
+
                 if self.get_type_size(&target_type) == self.get_type_size(&src_type) {
                     tac_instructions.push(TacInstruction::Copy {
                         src,
@@ -725,26 +788,6 @@ impl TacProgram {
                         dst: dst.clone(),
                     });
                 }
-                // match (src_type, target_type) {
-                //     (Type::Int, Type::Long) => {
-                //         tac_instructions.push(TacInstruction::SignExtend {
-                //             src,
-                //             dst: dst.clone(),
-                //         });
-                //     }
-                //     (Type::Long, Type::Int) => {
-                //         tac_instructions.push(TacInstruction::Truncate {
-                //             src,
-                //             dst: dst.clone(),
-                //         });
-                //     }
-                //     _ => {
-                //         tac_instructions.push(TacInstruction::Copy {
-                //             src,
-                //             dst: dst.clone(),
-                //         });
-                //     }
-                // }
                 dst
             }
         }
@@ -764,11 +807,10 @@ impl TacProgram {
     }
 
     fn get_type_size(&mut self, type1: &Type) -> u32 {
-        let size = match type1 {
+        match type1 {
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong => 8,
             _ => 4,
-        };
-        size
+        }
     }
 }

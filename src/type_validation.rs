@@ -26,12 +26,13 @@ pub enum InitialValue {
     NoInitializer,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StaticInit {
     IntInit(i32),
     UIntInit(u32),
     LongInit(i64),
     ULongInit(u64),
+    Double(f64),
 }
 
 impl Default for TypeValidation {
@@ -181,21 +182,35 @@ impl TypeValidation {
                     Expression::Constant(val) => match val {
                         Const::ConstInt(i) => match var_decl.var_type {
                             Type::Long => InitialValue::Initial(StaticInit::LongInit(*i as i64)),
+                            Type::ULong => InitialValue::Initial(StaticInit::ULongInit(*i as u64)),
+                            Type::Double => InitialValue::Initial(StaticInit::Double(*i as f64)),
                             _ => InitialValue::Initial(StaticInit::IntInit(*i)),
                         },
                         Const::ConstUInt(ui) => match var_decl.var_type {
-                            //TODO fix this
-                            Type::Long => InitialValue::Initial(StaticInit::ULongInit(*ui as u64)),
+                            Type::Long => InitialValue::Initial(StaticInit::LongInit(*ui as i64)),
+                            Type::ULong => InitialValue::Initial(StaticInit::ULongInit(*ui as u64)),
+                            Type::Double => InitialValue::Initial(StaticInit::Double(*ui as f64)),
                             _ => InitialValue::Initial(StaticInit::UIntInit(*ui)),
                         },
                         Const::ConstLong(l) => match var_decl.var_type {
                             Type::Int => InitialValue::Initial(StaticInit::IntInit(*l as i32)),
+                            Type::UInt => InitialValue::Initial(StaticInit::UIntInit(*l as u32)),
+                            Type::Double => InitialValue::Initial(StaticInit::Double(*l as f64)),
                             _ => InitialValue::Initial(StaticInit::LongInit(*l)),
                         },
                         Const::ConstULong(ul) => match var_decl.var_type {
-                            //TODO fix this
-                            Type::Int => InitialValue::Initial(StaticInit::UIntInit(*ul as u32)),
+                            Type::Int => InitialValue::Initial(StaticInit::IntInit(*ul as i32)),
+                            Type::UInt => InitialValue::Initial(StaticInit::UIntInit(*ul as u32)),
+                            Type::Double => InitialValue::Initial(StaticInit::Double(*ul as f64)),
                             _ => InitialValue::Initial(StaticInit::ULongInit(*ul)),
+                        },
+                        Const::ConstDouble(d) => match var_decl.var_type {
+                            Type::Int => InitialValue::Initial(StaticInit::IntInit(*d as i32)),
+                            Type::UInt => InitialValue::Initial(StaticInit::UIntInit(*d as u32)),
+                            Type::Long => InitialValue::Initial(StaticInit::LongInit(*d as i64)),
+                            Type::ULong => InitialValue::Initial(StaticInit::ULongInit(*d as u64)),
+                            Type::Double => InitialValue::Initial(StaticInit::Double(*d)),
+                            _ => panic!("Unsupported type!"),
                         },
                     },
                     _ => InitialValue::Initial(StaticInit::IntInit(0)),
@@ -304,10 +319,6 @@ impl TypeValidation {
                 panic!("Initializer element is not constant");
             }
         };
-
-        if is_static && !is_global_scope {
-            var_decl.init = None;
-        }
     }
 
     fn is_constant_expression(&self, expr: &TypedExpression) -> bool {
@@ -339,6 +350,7 @@ impl TypeValidation {
                     Const::ConstUInt(_) => Type::UInt,
                     Const::ConstLong(_) => Type::Long,
                     Const::ConstULong(_) => Type::ULong,
+                    Const::ConstDouble(_) => Type::Double,
                 });
             }
             Expression::FunctionCall { name, args } => {
@@ -389,6 +401,14 @@ impl TypeValidation {
                 let inner_type = expr.etype.as_ref().unwrap();
                 match op {
                     UnaryOperator::Not => typed_expr.etype = Some(Type::Int),
+                    UnaryOperator::Complement => {
+                        if *inner_type == Type::Double {
+                            panic!("typecheck_expression Cannot bit complement a double!");
+                        } else {
+                            typed_expr.etype = Some(inner_type.clone())
+                        }
+                    }
+
                     _ => typed_expr.etype = Some(inner_type.clone()),
                 }
             }
@@ -401,6 +421,13 @@ impl TypeValidation {
                 if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
                     typed_expr.etype = Some(Type::Int);
                     return;
+                }
+                if matches!(op, BinaryOperator::Modulo)
+                    && (*left_type == Type::Double || *right_type == Type::Double)
+                {
+                    panic!(
+                        "typecheck_expression Cannot have double on either side of modulo sign!"
+                    );
                 }
 
                 let common_type = self.get_common_type(left_type, right_type);
@@ -610,6 +637,10 @@ impl TypeValidation {
             return type1.clone();
         }
 
+        if *type1 == Type::Double || *type2 == Type::Double {
+            return Type::Double;
+        }
+
         if self.get_type_size(type1) == self.get_type_size(type2) {
             if *type1 == Type::Int || *type1 == Type::Long {
                 return type2.clone();
@@ -617,19 +648,18 @@ impl TypeValidation {
                 return type1.clone();
             }
         }
-        if self.get_type_size(&type1) > self.get_type_size(&type2) {
-            return type1.clone();
+        if self.get_type_size(type1) > self.get_type_size(type2) {
+            type1.clone()
         } else {
-            return type2.clone();
+            type2.clone()
         }
     }
 
     fn get_type_size(&mut self, type1: &Type) -> u32 {
-        let size = match type1 {
+        match type1 {
             Type::Int | Type::UInt => 4,
             Type::Long | Type::ULong => 8,
-            _ => 4,
-        };
-        size
+            _ => 8,
+        }
     }
 }

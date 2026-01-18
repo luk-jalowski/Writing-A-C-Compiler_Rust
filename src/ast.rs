@@ -146,6 +146,7 @@ pub enum Type {
     UInt,
     Long, // 64 bit
     ULong,
+    Double, // 64 bit
     FuncType { params: Vec<Type>, ret: Box<Type> },
 }
 
@@ -155,4 +156,5 @@ pub enum Const {
     ConstUInt(u32),
     ConstLong(i64),
     ConstULong(u64),
+    ConstDouble(f64),
 }

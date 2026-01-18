@@ -47,6 +47,7 @@ impl Parser {
         match self.peek_token().map(|t| t.token_type) {
             Some(TokenType::KeywordInt)
             | Some(TokenType::KeywordLong)
+            | Some(TokenType::KeywordDouble)
             | Some(TokenType::KeywordSigned)
             | Some(TokenType::KeywordUnsigned)
             | Some(TokenType::KeywordStatic)
@@ -148,6 +149,10 @@ impl Parser {
                     self.consume_token();
                     types.push("unsigned".to_string());
                 }
+                TokenType::KeywordDouble => {
+                    self.consume_token();
+                    types.push("double".to_string());
+                }
                 TokenType::KeywordStatic => {
                     self.consume_token();
                     storage_classes.push(StorageClass::Static);
@@ -187,6 +192,7 @@ impl Parser {
         let mut long_count = 0;
         let mut signed_count = 0;
         let mut unsigned_count = 0;
+        let mut double_count = 0;
 
         for t in &types {
             match t.as_str() {
@@ -194,6 +200,7 @@ impl Parser {
                 "long" => long_count += 1,
                 "signed" => signed_count += 1,
                 "unsigned" => unsigned_count += 1,
+                "double" => double_count += 1,
                 _ => panic!("Unknown type specifier {}", t),
             }
         }
@@ -204,8 +211,16 @@ impl Parser {
             || (signed_count > 0 && unsigned_count > 0)
             || int_count > 1
             || long_count > 2
+            || double_count > 1
         {
             panic!("parse_type Invalid type specifier {:?}", types);
+        }
+
+        if double_count == 1 {
+            if signed_count > 0 || unsigned_count > 0 || int_count > 0 {
+                panic!("Cannot combine double with signed, unsigned or int");
+            }
+            return Type::Double;
         }
 
         if long_count > 0 {
@@ -391,7 +406,8 @@ impl Parser {
         | Some(TokenType::KeywordSigned)
         | Some(TokenType::KeywordUnsigned)
         | Some(TokenType::KeywordStatic)
-        | Some(TokenType::KeywordExtern) = self.peek_token().map(|t| t.token_type)
+        | Some(TokenType::KeywordExtern)
+        | Some(TokenType::KeywordDouble) = self.peek_token().map(|t| t.token_type)
         {
             match self.parse_declaration() {
                 Declaration::VarDecl(var_decl) => ForInit::InitDeclaration(var_decl),
@@ -430,6 +446,10 @@ impl Parser {
                     expr: Expression::Constant(Const::ConstULong(val)),
                     etype: None,
                 },
+                TokenType::Double(val) => TypedExpression {
+                    expr: Expression::Constant(Const::ConstDouble(val)),
+                    etype: None,
+                },
                 TokenType::Hyphen => TypedExpression {
                     expr: Expression::UnaryExpr(
                         UnaryOperator::Negate,
@@ -452,6 +472,7 @@ impl Parser {
                     let next_token = self.peek_token().map(|t| t.token_type);
                     if next_token == Some(TokenType::KeywordInt)
                         || next_token == Some(TokenType::KeywordLong)
+                        || next_token == Some(TokenType::KeywordDouble)
                         || next_token == Some(TokenType::KeywordSigned)
                         || next_token == Some(TokenType::KeywordUnsigned)
                     {
@@ -465,6 +486,10 @@ impl Parser {
                                 TokenType::KeywordLong => {
                                     self.consume_token();
                                     types.push("long".to_string());
+                                }
+                                TokenType::KeywordDouble => {
+                                    self.consume_token();
+                                    types.push("double".to_string());
                                 }
                                 TokenType::KeywordSigned => {
                                     self.consume_token();

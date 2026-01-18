@@ -22,6 +22,7 @@ pub enum TokenType {
     KeywordLong,
     KeywordSigned,
     KeywordUnsigned,
+    KeywordDouble,
 
     OpenParen,    // (
     CloseParen,   // )
@@ -55,6 +56,7 @@ pub enum TokenType {
     Integer64(i64),
     UnsignedInteger32(u32),
     UnsignedInteger64(u64),
+    Double(f64),
     Identifier(String),
 
     EOF,
@@ -256,10 +258,25 @@ impl<'a> Lexer<'a> {
                 }
 
                 '0'..='9' => {
-                    let num_token = self.lex_integer();
+                    let num_token = self.lex_number(String::new(), false);
                     tokens.push(Token {
                         token_type: num_token,
                     });
+                }
+                '.' => {
+                    self.chars.next();
+                    if let Some(&c) = self.chars.peek() {
+                        if c.is_ascii_digit() {
+                            let num_token = self.lex_number(String::from("."), true);
+                            tokens.push(Token {
+                                token_type: num_token,
+                            });
+                        } else {
+                            panic!("Unexpected character .");
+                        }
+                    } else {
+                        panic!("Unexpected character .");
+                    }
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
                     let word = self.lex_word();
@@ -281,6 +298,7 @@ impl<'a> Lexer<'a> {
                         "extern" => TokenType::KeywordExtern,
                         "signed" => TokenType::KeywordSigned,
                         "unsigned" => TokenType::KeywordUnsigned,
+                        "double" => TokenType::KeywordDouble,
                         _ => TokenType::Identifier(word),
                     };
                     tokens.push(Token {
@@ -301,15 +319,69 @@ impl<'a> Lexer<'a> {
         tokens
     }
 
-    fn lex_integer(&mut self) -> TokenType {
-        let mut num_str = String::new();
-        while let Some(&c) = self.chars.peek() {
-            if c.is_ascii_digit() {
+    fn lex_number(&mut self, mut num_str: String, mut is_float: bool) -> TokenType {
+        if !is_float {
+            while let Some(&c) = self.chars.peek() {
+                if c.is_ascii_digit() {
+                    num_str.push(c);
+                    self.chars.next();
+                } else {
+                    break;
+                }
+            }
+            if let Some('.') = self.chars.peek() {
+                is_float = true;
+                num_str.push('.');
+                self.chars.next();
+            }
+        }
+
+        if is_float {
+            while let Some(&c) = self.chars.peek() {
+                if c.is_ascii_digit() {
+                    num_str.push(c);
+                    self.chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if let Some(&c) = self.chars.peek() {
+            if c == 'e' || c == 'E' {
+                is_float = true;
                 num_str.push(c);
                 self.chars.next();
-            } else {
-                break;
+                if let Some(&c) = self.chars.peek() {
+                    if c == '+' || c == '-' {
+                        num_str.push(c);
+                        self.chars.next();
+                    }
+                }
+                let mut has_digits = false;
+                while let Some(&c) = self.chars.peek() {
+                    if c.is_ascii_digit() {
+                        num_str.push(c);
+                        self.chars.next();
+                        has_digits = true;
+                    } else {
+                        break;
+                    }
+                }
+                if !has_digits {
+                    panic!("Invalid exponent");
+                }
             }
+        }
+
+        if is_float {
+            if let Some(&c) = self.chars.peek() {
+                if c == '.' || c.is_ascii_alphanumeric() || c == '_' {
+                    panic!("Invalid character after number: {}", c);
+                }
+            }
+            let val: f64 = num_str.parse().expect("Expected to parse a double");
+            return TokenType::Double(val);
         }
 
         let mut is_long = false;
@@ -338,8 +410,8 @@ impl<'a> Lexer<'a> {
         }
 
         if let Some(&c) = self.chars.peek() {
-            if c.is_ascii_alphanumeric() {
-                panic!("Invalid suffix or identifier part after number");
+            if c == '.' || c.is_ascii_alphanumeric() || c == '_' {
+                panic!("Invalid character after number: {}", c);
             }
         }
 
@@ -405,7 +477,6 @@ impl<'a> Lexer<'a> {
             tokens.push(Token {
                 token_type: TokenType::ForwardSlash,
             });
-            self.chars.next();
         }
     }
 }
